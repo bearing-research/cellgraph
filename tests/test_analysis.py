@@ -134,7 +134,8 @@ def test_a_language_without_directives_reads_no_annotations(vocab):
     assert cell.plannable
     # The heading lines are the body, so they stay in its normalized text.
     assert cell.normalized == "# @worker big\n# @nocache maybe\nSome prose."
-    assert not cg.reads_directives(Prose()) and cg.reads_directives(cg.PythonAnalyzer())
+    assert cg.directive_keys(Prose()) == frozenset()
+    assert cg.directive_keys(cg.PythonAnalyzer()) is None
 
 
 def _every_line(directives):
@@ -201,3 +202,99 @@ def test_a_partial_value_keeps_its_effects_and_reports_its_errors():
     assert cell.key_fields == {"src": ["data"]}
     assert [(d.code, d.line) for d in cell.diagnostics] == [("src_unreadable", 2)]
     assert not cell.plannable
+
+
+class Notes(Prose):
+    directives = frozenset({"app"})
+
+
+def test_a_language_with_a_key_set_reads_only_those_keys(vocab):
+    vocab = vocab | cg.Vocabulary([cg.Annotation("app", in_key=False)])
+    source = "# @app hide\n# @after c0\n# @nocache maybe\n# @worker\nSome notes."
+    analysis = cg.analyze(
+        [cg.Cell("c0", "x = 1"), cg.Cell("c1", source, language="notes")],
+        vocab,
+        analyzers={"python": cg.PythonAnalyzer(), "notes": Notes()},
+        normalization=cg.NORMALIZE_CELLGRAPH_1,
+    )
+    cell = analysis.cells["c1"]
+    assert cell.annotations == {"app": "hide"}
+    # The other ``# @`` lines are prose: no annotation, no edge, no diagnostic.
+    assert cell.diagnostics == [] and cell.after == []
+    assert edges(analysis) == []
+    assert cell.plannable
+    # Only the read key leaves the normalized text.
+    assert cell.normalized == "# @after c0\n# @nocache maybe\n# @worker\nSome notes."
+
+
+def test_directives_must_be_a_bool_or_a_frozenset():
+    class Bad(Prose):
+        directives = ["app"]
+
+    with pytest.raises(TypeError, match="frozenset"):
+        cg.directive_keys(Bad())
+
+
+class Checked(Prose):
+    """An analyzer that reports what the cell's first line asks for."""
+
+    directives = True
+
+    def analyze(self, cell):
+        first = cg.GRAMMAR.strip(cell.source).splitlines()[0]
+        names = first.split()
+        severity = {"error": cg.Severity.ERROR, "warn": cg.Severity.WARN}.get(names[0])
+        found = []
+        if severity is not None:
+            found = [cg.Diagnostic("checked", severity, "found", cell="wrong", line=2)]
+            names = names[1:]
+        return cg.Analyzed(defines=names[:1], references=names[1:], diagnostics=found)
+
+
+@pytest.mark.parametrize(
+    "dependents",
+    [("y = x",), ("# @after c0\ny = 1",)],
+    ids=["variable", "after"],
+)
+def test_an_analyzer_error_blocks_the_cell_and_its_dependents(vocab, dependents):
+    cells = [cg.Cell("c0", "error x", language="checked")]
+    cells += [cg.Cell(f"c{i + 1}", src) for i, src in enumerate(dependents)]
+    analysis = cg.analyze(
+        cells, vocab, analyzers={"python": cg.PythonAnalyzer(), "checked": Checked()}
+    )
+    (diag,) = analysis.cells["c0"].diagnostics
+    # The diagnostic is the analyzed cell's, whatever the analyzer named.
+    assert (diag.code, diag.severity, diag.cell, diag.line) == (
+        "checked",
+        cg.Severity.ERROR,
+        "c0",
+        2,
+    )
+    assert not analysis.cells["c0"].plannable
+    assert not analysis.cells["c1"].plannable
+    assert analysis.cells["c1"].blocked_by == ["c0"]
+    assert [d.code for d in analysis.blocking("c1")] == ["checked"]
+
+
+def test_an_analyzer_warning_does_not_block(vocab):
+    analysis = cg.analyze(
+        [cg.Cell("c0", "warn x", language="checked"), cg.Cell("c1", "y = x")],
+        vocab,
+        analyzers={"python": cg.PythonAnalyzer(), "checked": Checked()},
+    )
+    assert [d.code for d in analysis.diagnostics] == ["checked"]
+    assert analysis.cells["c0"].plannable and analysis.cells["c1"].plannable
+    assert analysis.cells["c0"].definition_key is not None
+
+
+def test_an_analyzer_error_string_is_still_a_syntax_error():
+    class Broken(Prose):
+        def analyze(self, cell):
+            return cg.Analyzed(error="cannot read", diagnostics=[])
+
+    analysis = cg.analyze(
+        [cg.Cell("a", "x", language="broken")],
+        cg.Vocabulary.core(),
+        analyzers={"broken": Broken()},
+    )
+    assert [d.code for d in analysis.diagnostics] == ["syntax_error"]

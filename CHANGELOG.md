@@ -1,7 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 (unreleased)
 
+- `directives` on a language analyzer is a bool or a frozenset of keys; a language
+  with a set reads only those keys, and its other `# @` lines are plain text.
+  `directive_keys(analyzer)` replaces `reads_directives` (#3).
+- `Analyzed.diagnostics`: an analyzer reports findings of its own, and an error
+  among them blocks the cell and its dependents like a syntax error.
+  `Analyzed.error` stays, as the `syntax_error` diagnostic (#3).
 - A language analyzer can set `directives = False`, so its `# @` lines (markdown
   headings) are not read as directives (#2).
 - A parser or validator reports several problems by raising an `ExceptionGroup` of

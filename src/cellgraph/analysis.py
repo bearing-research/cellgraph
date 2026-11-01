@@ -17,7 +17,7 @@ import difflib
 import math
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from cellgraph.diagnostics import Diagnostic, Severity
@@ -39,7 +39,7 @@ from cellgraph.grammar import Directive
 from cellgraph.languages import (
     Analyzed,
     LanguageAnalyzer,
-    reads_directives,
+    directive_keys,
     registered_analyzers,
 )
 from cellgraph.vocabulary import AnnotationError, Partial, ValidationContext, Vocabulary
@@ -375,8 +375,7 @@ def _parse_phase(
 ) -> tuple[CellAnalysis, Analyzed]:
     """Phase 1: the body's analysis, and every annotation's parser."""
     ca = CellAnalysis(id=cell.id, language=cell.language, source=cell.source)
-    if reads_directives(analyzer):
-        ca.directives = vocabulary.grammar.directives(cell.source)
+    ca.directives = vocabulary.grammar.directives(cell.source, keys=directive_keys(analyzer))
 
     by_owner: dict[str, list[Directive]] = {}
     for directive in ca.directives:
@@ -443,6 +442,7 @@ def _parse_phase(
     analyzed = analyzer.analyze(cell)
     if analyzed.error is not None:
         ca.error("syntax_error", analyzed.error)
+    ca.diagnostics.extend(replace(d, cell=ca.id) for d in analyzed.diagnostics)
     return ca, analyzed
 
 
