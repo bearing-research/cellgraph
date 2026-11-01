@@ -108,3 +108,96 @@ def test_unknown_normalization_or_digest_is_refused(run):
         run("x = 1", normalization="nope")
     with pytest.raises(ValueError):
         run("x = 1", digest="nope")
+
+
+class Prose:
+    owns_key = True
+    directives = False
+
+    def analyze(self, cell):
+        return cg.Analyzed()
+
+    def normalize(self, body):
+        return cg.strip_lines(body)
+
+
+def test_a_language_without_directives_reads_no_annotations(vocab):
+    source = "# @worker big\n# @nocache maybe\nSome prose."
+    analysis = cg.analyze(
+        [cg.Cell("a", source, language="prose")],
+        vocab,
+        analyzers={"prose": Prose()},
+        normalization=cg.NORMALIZE_CELLGRAPH_1,
+    )
+    cell = analysis.cells["a"]
+    assert (cell.directives, cell.annotations, cell.diagnostics) == ([], {}, [])
+    assert cell.plannable
+    # The heading lines are the body, so they stay in its normalized text.
+    assert cell.normalized == "# @worker big\n# @nocache maybe\nSome prose."
+    assert not cg.reads_directives(Prose()) and cg.reads_directives(cg.PythonAnalyzer())
+
+
+def _every_line(directives):
+    errors = [cg.AnnotationError(f"bad {d.value}", line=d.line) for d in directives if d.value]
+    if errors:
+        raise ExceptionGroup("check", errors)
+    return True
+
+
+def test_a_parser_reports_each_error_in_a_group():
+    vocab = cg.Vocabulary([cg.Annotation("check", parse=_every_line, in_key=False)])
+    analysis = cg.analyze([cg.Cell("a", "# @check one\n# @check\n# @check two\nx = 1")], vocab)
+    assert [(d.code, d.line) for d in analysis.diagnostics] == [
+        ("check_unreadable", 1),
+        ("check_unreadable", 3),
+    ]
+
+
+def test_a_group_with_another_exception_is_not_swallowed():
+    def parse(directives):
+        raise ExceptionGroup("mixed", [cg.AnnotationError("bad"), KeyError("bug")])
+
+    vocab = cg.Vocabulary([cg.Annotation("check", parse=parse, in_key=False)])
+    with pytest.raises(ExceptionGroup) as raised:
+        cg.analyze([cg.Cell("a", "# @check x\ny = 1")], vocab)
+    assert isinstance(raised.value.exceptions[0], KeyError)
+
+
+def test_a_validator_error_defaults_to_its_annotation_line():
+    def validate(value, ctx):
+        raise ExceptionGroup(
+            "tag", [cg.AnnotationError("first"), cg.AnnotationError("second", line=7)]
+        )
+
+    vocab = cg.Vocabulary([cg.Annotation("tag", in_key=False, validate=validate)])
+    analysis = cg.analyze([cg.Cell("a", "# note\n# @tag ok\nx = 1")], vocab)
+    assert [(d.code, d.line) for d in analysis.diagnostics] == [
+        ("tag_invalid", 2),
+        ("tag_invalid", 7),
+    ]
+
+
+def _readable_lines(directives):
+    good = [d.value for d in directives if d.value.isidentifier()]
+    bad = [cg.AnnotationError("bad", line=d.line) for d in directives if not d.value.isidentifier()]
+    return cg.Partial(good, bad) if bad else good
+
+
+def test_a_partial_value_keeps_its_effects_and_reports_its_errors():
+    vocab = cg.Vocabulary(
+        [
+            cg.Annotation(
+                "src",
+                parse=_readable_lines,
+                effects=lambda names: [cg.Binds(names)],
+                encode=sorted,
+            )
+        ]
+    )
+    analysis = cg.analyze([cg.Cell("a", "# @src data\n# @src 1x\ny = data")], vocab)
+    cell = analysis.cells["a"]
+    assert cell.annotations["src"] == ["data"]
+    assert cell.bound == ["data"] and cell.references == []
+    assert cell.key_fields == {"src": ["data"]}
+    assert [(d.code, d.line) for d in cell.diagnostics] == [("src_unreadable", 2)]
+    assert not cell.plannable
