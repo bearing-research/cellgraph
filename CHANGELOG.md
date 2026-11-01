@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- `Diagnostic.args`: what the message was built from, such as the cell id an
+  `@after` names, so a host can word a finding its own way. It does not count in
+  equality or hashing (#7).
+- An `@after` problem is on the line that names the id, and a seed error is on the
+  line of the annotation that seeded; it had no line (#7).
+
 ## 0.1.0 - 2026-11-01
 
 - The package ships `py.typed`, so type checkers read its annotations (#6).

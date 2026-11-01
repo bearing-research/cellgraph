@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from enum import StrEnum
+from typing import Any
 
 
 class Severity(StrEnum):
@@ -16,7 +18,11 @@ class Severity(StrEnum):
 
 @dataclass(frozen=True)
 class Diagnostic:
-    """One finding. ``annotation`` is the directive key it is about, if any."""
+    """One finding. ``annotation`` is the directive key it is about, if any.
+
+    ``args`` holds what the message was built from, such as the cell id an ``@after``
+    names, so a host can word the finding its own way.
+    """
 
     code: str
     severity: Severity
@@ -24,3 +30,4 @@ class Diagnostic:
     cell: str | None = None
     annotation: str | None = None
     line: int | None = None
+    args: Mapping[str, Any] = field(default_factory=dict, compare=False)
