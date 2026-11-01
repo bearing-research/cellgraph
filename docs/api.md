@@ -257,7 +257,8 @@ Results:
   `legacy-1`, an unreadable output is skipped, and a missing digest falls back to
   the provenance hash, as Strata does; an unresolved input is unavailable under
   both.
-- `HostKeyed(parts)`: for a language with `owns_key=False`.
+- `HostKeyed(parts)`: for a language with `owns_key=False`. `parts` holds the
+  upstream components it reads, for the host's own key, and no inputs.
 
 A blocked cell is keyed too, as are the cells downstream of it: a result cached
 under its key is still its result, and whether it may run is `plannable`. A cell a

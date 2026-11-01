@@ -219,10 +219,16 @@ def test_a_host_keyed_language_gets_no_digest(vocab):
     class HostOwned(Words):
         owns_key = False
 
-    analysis = cg.analyze([cg.Cell("a", "y", language="h")], vocab, analyzers={"h": HostOwned()})
-    assert isinstance(
-        analysis.execution_key("a", published=published(), env_hash=ENV), cg.HostKeyed
+    analysis = cg.analyze(
+        [cg.Cell("p", "y = 1"), cg.Cell("a", "z y", language="h")],
+        vocab,
+        analyzers={"python": cg.get_language_analyzer("python"), "h": HostOwned()},
     )
+    key = analysis.execution_key("a", published=published(p=out(y="hp")), env_hash=ENV)
+    assert isinstance(key, cg.HostKeyed)
+    # What it reads upstream, for the host's own key.
+    assert key.parts["upstream"] == [["output:p.y", "hp"]]
+    assert key.parts["inputs"] == []
 
 
 def test_a_blocked_cell_and_its_dependents_are_keyed(run):

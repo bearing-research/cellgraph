@@ -142,7 +142,11 @@ class Unavailable:
 
 @dataclass(frozen=True)
 class HostKeyed:
-    """The host computes this cell's key (``owns_key=False``)."""
+    """The host computes this cell's key (``owns_key=False``).
+
+    ``parts`` holds the upstream components the cell reads, as a key would, and no
+    inputs: those are the host's to key.
+    """
 
     parts: dict[str, Any] | None = None
 
@@ -375,8 +379,7 @@ def execution_key(
     ]
     if structural:
         raise NotPlannableError(cell_id, structural)
-    if not analysis.analyzers[cell.language].owns_key:
-        return HostKeyed()
+    owns_key = analysis.analyzers[cell.language].owns_key
     fanout = analysis.graph.fanout_cells.get(cell_id)
     if instance is not None:
         if fanout is None:
@@ -388,7 +391,8 @@ def execution_key(
     assembly = _upstream(analysis, cell_id, instance, published)
     inputs: list[tuple[str, str, str]] = []
     resolvers = resolve or {}
-    for spec in cell.inputs:
+    # A host-keyed cell's inputs are the host's to key.
+    for spec in cell.inputs if owns_key else []:
         if spec.kind not in resolvers:
             raise ValueError(f"no resolver for {spec.kind!r} inputs (cell {cell_id})")
         result = resolvers[spec.kind](spec)
@@ -418,6 +422,8 @@ def execution_key(
         "upstream": sorted([address, value] for address, value in assembly.components),
         "inputs": sorted([kind, name, component] for kind, name, component in inputs),
     }
+    if not owns_key:
+        return HostKeyed(parts=parts)
     if assembly.unresolved:
         return Unavailable(
             reason="unresolved: " + ", ".join(assembly.unresolved),
