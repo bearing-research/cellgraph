@@ -20,10 +20,10 @@ ends at the first line of body. Keys are lower-cased and values stripped.
 
 | Method | Does |
 | ------ | ---- |
-| `directives(source)` | `[Directive(key, value, line)]`, in source order |
+| `directives(source, keys=None)` | `[Directive(key, value, line)]`, in source order; only `keys` when given |
 | `parse_directive(line)` | `(key, value)` or None |
 | `strip(source)` | the source without its leading block |
-| `strip_directives(source)` | the source without its directive lines; other comments stay |
+| `strip_directives(source, keys=None)` | the source without its directive lines (only `keys`' when given); other comments stay |
 | `set_directive(source, key, value)` | replace the first `# @key`, drop repeats, or insert one after the last directive; line endings are kept |
 | `remove_directive(source, key)` | every `# @key` in the block removed |
 
@@ -103,12 +103,27 @@ class LanguageAnalyzer(Protocol):
     def normalize(self, body: str) -> str: ...
 ```
 
-An analyzer may also set `directives = False` for a language whose `# @` lines are
-not directives, such as markdown headings: its cells get no annotations, and the
-`cellgraph-1` normalization keeps those lines. `reads_directives(analyzer)` tells.
+An analyzer may also set `directives`:
 
-`Analyzed(defines, references, builtin_references, mutation_defines, error)`.
-`error` is a body that cannot be read, and becomes the error `syntax_error`.
+- `True`, the default: every directive is read.
+- `False`: none, for a language whose `# @` lines are prose, such as markdown
+  headings.
+- A frozenset of keys: only those, e.g. `frozenset({"app"})`.
+
+A `# @` line whose key the language does not read is plain text: no annotation and
+no diagnostic, not even `annotation_unknown`, and the `cellgraph-1` normalization
+keeps it in the body. `directive_keys(analyzer)` gives the set, or None for every
+key; any other value of `directives` is a `TypeError`.
+
+`Analyzed(defines, references, builtin_references, mutation_defines, error,
+diagnostics)`.
+
+- `error` is a body that cannot be read, and becomes the error `syntax_error`.
+- `diagnostics` is anything else the analyzer finds, such as a host's
+  per-language checks that run with or without a directive. They are the cell's
+  (their `cell` is set to its id). An error blocks the cell and its dependents,
+  exactly as a syntax error does.
+
 `owns_key=False` means the host computes the cell's execution key; such a cell
 still gets names, edges, plannability and plan steps, and `execution_key` returns
 `HostKeyed`.

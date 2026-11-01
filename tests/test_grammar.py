@@ -43,3 +43,11 @@ def test_remove_round_trips_with_parsing():
     removed = GRAMMAR.remove_directive(source, "w")
     assert removed == "# @t 1\nx = 1\n"
     assert [d.key for d in GRAMMAR.directives(removed)] == ["t"]
+
+
+def test_a_key_set_reads_and_strips_only_those_keys():
+    source = "# @app hide\n# @after a1\n# note\nx = 1"
+    assert GRAMMAR.directives(source, keys={"app"}) == [Directive("app", "hide", 1)]
+    assert GRAMMAR.directives(source, keys=frozenset()) == []
+    assert GRAMMAR.strip_directives(source, keys={"app"}) == "# @after a1\n# note\nx = 1"
+    assert GRAMMAR.strip_directives(source, keys=frozenset()) == source

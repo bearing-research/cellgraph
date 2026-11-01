@@ -9,7 +9,7 @@ with parsing. A second syntax (Quarto's ``#| key: value``) would be another
 from __future__ import annotations
 
 import re
-from collections.abc import Iterator
+from collections.abc import Container, Iterator
 from dataclasses import dataclass
 
 
@@ -48,12 +48,12 @@ class Grammar:
             return None
         return match.group(1).lower(), match.group(2).strip()
 
-    def directives(self, source: str) -> list[Directive]:
-        """Every directive of the leading block, in source order."""
+    def directives(self, source: str, keys: Container[str] | None = None) -> list[Directive]:
+        """Every directive of the leading block, in source order; only *keys* when given."""
         found = []
         for lineno, line in self.block(source):
             parsed = self.parse_directive(line)
-            if parsed is not None:
+            if parsed is not None and (keys is None or parsed[0] in keys):
                 found.append(Directive(key=parsed[0], value=parsed[1], line=lineno))
         return found
 
@@ -67,16 +67,20 @@ class Grammar:
             return "\n".join(lines[i:])
         return ""
 
-    def strip_directives(self, source: str) -> str:
+    def strip_directives(self, source: str, keys: Container[str] | None = None) -> str:
         """Return *source* without the directive lines of its leading block.
 
-        Other comments stay: they are the body's, for its normalizer to judge.
+        With *keys*, only those keys' lines go. Other comments stay: they are the
+        body's, for its normalizer to judge.
         """
         lines = source.splitlines()
         end = self._block_end(lines)
-        kept = [
-            line for i, line in enumerate(lines) if i >= end or self.parse_directive(line) is None
-        ]
+
+        def is_directive(line: str) -> bool:
+            parsed = self.parse_directive(line)
+            return parsed is not None and (keys is None or parsed[0] in keys)
+
+        kept = [line for i, line in enumerate(lines) if i >= end or not is_directive(line)]
         return "\n".join(kept)
 
     def set_directive(self, source: str, key: str, value: str) -> str:

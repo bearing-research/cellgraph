@@ -11,6 +11,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol
 
+from cellgraph.diagnostics import Diagnostic
+
 if TYPE_CHECKING:
     from cellgraph.analysis import Cell
 
@@ -26,14 +28,19 @@ class Analyzed:
     builtin_references: list[str] = field(default_factory=list)
     # Names the body mutates in place (``df["c"] = ...``): read and defined.
     mutation_defines: list[str] = field(default_factory=list)
+    # A body that cannot be read becomes the error ``syntax_error``.
     error: str | None = None
+    # Anything else the analyzer finds; an ERROR blocks the cell like a syntax error.
+    diagnostics: list[Diagnostic] = field(default_factory=list)
 
 
 class LanguageAnalyzer(Protocol):
     """What ``analyze`` needs of a language.
 
-    An analyzer may also set ``directives = False`` for a language whose ``# @``
-    lines are not directives (markdown headings): its cells get no annotations.
+    An analyzer may also set ``directives``: ``True`` (the default) reads every
+    directive, ``False`` none (markdown headings are ``#`` lines), and a frozenset
+    of keys only those. A ``# @`` line whose key is not read is plain text: no
+    annotation and no diagnostic.
     """
 
     owns_key: bool
@@ -47,9 +54,16 @@ class LanguageAnalyzer(Protocol):
         ...
 
 
-def reads_directives(analyzer: LanguageAnalyzer) -> bool:
-    """Whether *analyzer*'s language has a directive block (``directives``, default True)."""
-    return bool(getattr(analyzer, "directives", True))
+def directive_keys(analyzer: LanguageAnalyzer) -> frozenset[str] | None:
+    """The directive keys *analyzer*'s language reads; None for every key."""
+    directives = getattr(analyzer, "directives", True)
+    if directives is True:
+        return None
+    if directives is False:
+        return frozenset()
+    if isinstance(directives, frozenset) and all(isinstance(k, str) for k in directives):
+        return frozenset(key.lower() for key in directives)
+    raise TypeError(f"`directives` must be a bool or a frozenset of keys, not {directives!r}")
 
 
 def strip_lines(source: str) -> str:

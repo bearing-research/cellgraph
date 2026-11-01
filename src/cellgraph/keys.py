@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any
 
 from cellgraph import python
 from cellgraph.effects import Input
-from cellgraph.languages import reads_directives
+from cellgraph.languages import directive_keys
 
 if TYPE_CHECKING:
     from cellgraph.analysis import Analysis, CellAnalysis
@@ -157,9 +157,9 @@ def definition_key(analysis: Analysis, cell: CellAnalysis) -> tuple[str, str]:
         normalized = python.normalize(cell.source)
     else:
         analyzer = analysis.analyzers[cell.language]
-        body = cell.source
-        if reads_directives(analyzer):
-            body = analysis.vocabulary.grammar.strip_directives(body)
+        body = analysis.vocabulary.grammar.strip_directives(
+            cell.source, keys=directive_keys(analyzer)
+        )
         normalized = analyzer.normalize(body)
     fields = cell.key_fields
     if analysis.digest == "legacy-1":
