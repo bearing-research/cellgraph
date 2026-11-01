@@ -16,7 +16,7 @@ formats it reproduces exactly under `legacy-1`.
 pip install cellgraph
 ```
 
-See [the API](docs/api.md).
+See [the API](https://github.com/bearing-research/cellgraph/blob/main/docs/api.md).
 
 ```python
 import cellgraph as cg
