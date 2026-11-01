@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.0 (unreleased)
+## Unreleased
 
 - `directives` on a language analyzer is a bool or a frozenset of keys; a language
   with a set reads only those keys, and its other `# @` lines are plain text.
