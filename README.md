@@ -12,6 +12,10 @@ package has no dependencies and runs nothing; the host executes, stores and
 resolves. It was factored out of Strata's notebook, its first host, whose
 formats it reproduces exactly under `legacy-1`.
 
+```bash
+pip install cellgraph
+```
+
 See [the API](docs/api.md).
 
 ```python
