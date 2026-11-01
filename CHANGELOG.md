@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 - 2026-11-01
 
 - `Diagnostic.args`: what the message was built from, such as the cell id an
   `@after` names, so a host can word a finding its own way. It does not count in
