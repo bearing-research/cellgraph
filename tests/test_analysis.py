@@ -9,6 +9,7 @@ def test_an_unknown_key_warns_with_a_hint_or_errors_when_strict(run):
     (diag,) = lax.diagnostics
     assert (diag.code, diag.severity) == ("annotation_unknown", cg.Severity.WARN)
     assert "`@nocache`" in diag.message
+    assert diag.args == {"key": "nocach", "suggestion": "nocache"}
     assert lax.cells["c0"].plannable
     strict = run("# @nocach\nx = 1", strict=True)
     assert strict.diagnostics[0].severity == cg.Severity.ERROR
@@ -91,6 +92,20 @@ def test_a_cell_seeded_from_two_cells_or_a_missing_one(run):
     assert codes(analysis) == ["seed_unknown_cell"]
 
 
+@pytest.mark.parametrize(
+    ("cells", "reason"),
+    [
+        (["x = 1", "# @name n\n# @seed c9 x\ny = x"], "unknown"),
+        (["x = 1", "# @name n\n# @seed c1 x\ny = x"], "self"),
+        (["y = 1", "# @name n\n# @seed c0 x\ny = x"], "undefined"),
+    ],
+)
+def test_a_seed_error_is_on_its_annotation_line_and_says_why(run, cells, reason):
+    (diag,) = run(*cells).cells["c1"].diagnostics
+    assert (diag.annotation, diag.line) == ("seed", 2)
+    assert diag.args == {"name": "x", "cell_id": diag.args["cell_id"], "reason": reason}
+
+
 def test_keeps_marks_a_defined_name_consumed(run):
     analysis = run("# @keep x\nx = 1\ny = 2", "# @keep nope\nz = 1")
     assert analysis.graph.consumed_variables["c0"] == {"x"}
@@ -101,6 +116,21 @@ def test_after_edges_and_their_diagnostics(run):
     analysis = run("x = 1", "# @after c0 c1 c7\ny = 1")
     assert ("c0", "c1", "") in edges(analysis)
     assert codes(analysis, "c1") == ["after_self", "after_unknown_cell"]
+
+
+def test_an_after_problem_is_on_the_line_naming_the_id(run):
+    analysis = run("x = 1", "# @after c0\n# @after c7, c1\ny = 1")
+    found = [(d.code, d.line, dict(d.args)) for d in analysis.cells["c1"].diagnostics]
+    assert sorted(found) == [
+        ("after_self", 2, {"cell_id": "c1"}),
+        ("after_unknown_cell", 2, {"cell_id": "c7"}),
+    ]
+
+
+def test_args_do_not_change_what_a_diagnostic_equals():
+    a = cg.Diagnostic("x", cg.Severity.WARN, "m", args={"k": 1})
+    assert a == cg.Diagnostic("x", cg.Severity.WARN, "m")
+    assert {a} == {cg.Diagnostic("x", cg.Severity.WARN, "m", args={"k": 2})}
 
 
 def test_unknown_normalization_or_digest_is_refused(run):

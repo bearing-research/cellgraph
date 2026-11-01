@@ -275,6 +275,8 @@ class CellAnalysis:
     annotations: dict[str, Any] = field(default_factory=dict)
     directives: list[Directive] = field(default_factory=list)
     effects: list[Effect] = field(default_factory=list)
+    # Per effect: the annotation key and line it came from; None for the host's hook.
+    origins: list[tuple[str | None, int | None]] = field(default_factory=list)
     defines: list[str] = field(default_factory=list)
     references: list[str] = field(default_factory=list)
     builtin_references: list[str] = field(default_factory=list)
@@ -282,6 +284,7 @@ class CellAnalysis:
     bound: list[str] = field(default_factory=list)
     after: list[str] = field(default_factory=list)
     seeds: dict[str, str] = field(default_factory=dict)
+    seed_origins: dict[str, tuple[str | None, int | None]] = field(default_factory=dict)
     member: Member | None = None
     fanout: FanOut | None = None
     kept: list[str] = field(default_factory=list)
@@ -295,9 +298,17 @@ class CellAnalysis:
     definition_key: str | None = None
     normalized: str | None = None
 
-    def error(self, code: str, message: str, *, annotation: str | None = None, line=None):
+    def error(
+        self,
+        code: str,
+        message: str,
+        *,
+        annotation: str | None = None,
+        line=None,
+        args: Mapping[str, Any] | None = None,
+    ):
         self.diagnostics.append(
-            Diagnostic(code, Severity.ERROR, message, self.id, annotation, line)
+            Diagnostic(code, Severity.ERROR, message, self.id, annotation, line, dict(args or {}))
         )
 
     def note(
@@ -308,8 +319,11 @@ class CellAnalysis:
         *,
         annotation: str | None = None,
         line=None,
+        args: Mapping[str, Any] | None = None,
     ):
-        self.diagnostics.append(Diagnostic(code, severity, message, self.id, annotation, line))
+        self.diagnostics.append(
+            Diagnostic(code, severity, message, self.id, annotation, line, dict(args or {}))
+        )
 
     @property
     def has_error(self) -> bool:
@@ -354,6 +368,14 @@ def _first_line(directives: list[Directive], key: str) -> int | None:
     return next((d.line for d in directives if d.key == key), None)
 
 
+def _naming_line(directives: list[Directive], key: str, token: str) -> int | None:
+    """The first *key* line with *token* among its values; else the first *key* line."""
+    for d in directives:
+        if d.key == key and token in (t.rstrip(",") for t in d.value.split()):
+            return d.line
+    return _first_line(directives, key)
+
+
 def _top_level_imports(source: str) -> set[str]:
     try:
         tree = ast.parse(source)
@@ -389,6 +411,7 @@ def _parse_phase(
                 f"`@{directive.key}` is not an annotation this vocabulary knows.{hint}",
                 annotation=directive.key,
                 line=directive.line,
+                args={"key": directive.key, "suggestion": close[0] if close else None},
             )
             continue
         by_owner.setdefault(owner.key, []).append(directive)
@@ -427,14 +450,19 @@ def _parse_phase(
                     f"({type(encoded).__name__}); the annotation needs an encoder",
                     annotation=annotation.key,
                     line=directives[0].line,
+                    args={"type": type(encoded).__name__},
                 )
             else:
                 ca.key_fields[annotation.key] = encoded
         if annotation.effects is not None:
-            ca.effects.extend(annotation.effects(value))
+            produced = list(annotation.effects(value))
+            ca.effects.extend(produced)
+            ca.origins.extend([(annotation.key, directives[0].line)] * len(produced))
 
     if vocabulary.cell_effects is not None:
-        ca.effects.extend(vocabulary.cell_effects(cell.meta, dict(ca.annotations)))
+        hooked = list(vocabulary.cell_effects(cell.meta, dict(ca.annotations)))
+        ca.effects.extend(hooked)
+        ca.origins.extend([(None, None)] * len(hooked))
     for effect in ca.effects:
         if not isinstance(effect, EFFECT_TYPES):
             raise TypeError(f"{effect!r} is not one of the ten effects")
@@ -472,11 +500,15 @@ def _names_phase(ca: CellAnalysis, analyzed: Analyzed) -> None:
         if isinstance(effect, Binds):
             for name in effect.names:
                 if name in bound:
-                    ca.error("bind_conflict", f"`{name}` is bound twice")
+                    ca.error("bind_conflict", f"`{name}` is bound twice", args={"name": name})
                 else:
                     bound.append(name)
     for name in sorted(set(bound) & set(read)):
-        ca.error("bind_read_conflict", f"`{name}` is both bound and read from upstream")
+        ca.error(
+            "bind_read_conflict",
+            f"`{name}` is both bound and read from upstream",
+            args={"name": name},
+        )
 
     ca.defines = defines
     ca.references = [name for name in references if name not in bound]
@@ -484,32 +516,59 @@ def _names_phase(ca: CellAnalysis, analyzed: Analyzed) -> None:
     ca.mutation_defines = list(analyzed.mutation_defines)
     ca.bound = bound
 
-    for effect in ca.effects:
+    for effect, (origin, origin_line) in zip(ca.effects, ca.origins, strict=True):
         if isinstance(effect, After):
             for cell_id in effect.cell_ids:
                 if cell_id not in ca.after:
                     ca.after.append(cell_id)
         elif isinstance(effect, Seeds):
             if effect.name in ca.seeds and ca.seeds[effect.name] != effect.cell_id:
-                ca.error("seed_conflict", f"`{effect.name}` is seeded from two cells")
+                ca.error(
+                    "seed_conflict",
+                    f"`{effect.name}` is seeded from two cells",
+                    annotation=origin,
+                    line=origin_line,
+                    args={"name": effect.name},
+                )
             else:
                 ca.seeds[effect.name] = effect.cell_id
+                ca.seed_origins[effect.name] = (origin, origin_line)
             if effect.name in bound:
-                ca.error("bind_read_conflict", f"`{effect.name}` is both bound and seeded")
+                ca.error(
+                    "bind_read_conflict",
+                    f"`{effect.name}` is both bound and seeded",
+                    annotation=origin,
+                    line=origin_line,
+                    args={"name": effect.name},
+                )
         elif isinstance(effect, Member):
             if ca.member is not None and ca.member != effect:
-                ca.error("member_conflict", "the cell is a member of two variants")
+                ca.error(
+                    "member_conflict",
+                    "the cell is a member of two variants",
+                    annotation=origin,
+                    line=origin_line,
+                )
             ca.member = effect
         elif isinstance(effect, FanOut):
             if ca.fanout is not None and ca.fanout != effect:
-                ca.error("fanout_conflict", "the cell fans out over two groups")
+                ca.error(
+                    "fanout_conflict",
+                    "the cell fans out over two groups",
+                    annotation=origin,
+                    line=origin_line,
+                )
             ca.fanout = effect
         elif isinstance(effect, Keeps):
             ca.kept.extend(name for name in effect.names if name not in ca.kept)
         elif isinstance(effect, Input):
             if any((i.kind, i.name) == (effect.kind, effect.name) for i in ca.inputs):
                 ca.error(
-                    "input_conflict", f"two {effect.kind} inputs have the address {effect.name!r}"
+                    "input_conflict",
+                    f"two {effect.kind} inputs have the address {effect.name!r}",
+                    annotation=origin,
+                    line=origin_line,
+                    args={"kind": effect.kind, "name": effect.name},
                 )
             else:
                 ca.inputs.append(effect)
@@ -537,7 +596,12 @@ def _resolve_groups(
                 f"{cell.id[:8]} in group '{group}'"
             )
             for cid in (clash, cell.id):
-                by_id[cid].error("variant_collision", message, annotation="variant")
+                by_id[cid].error(
+                    "variant_collision",
+                    message,
+                    annotation="variant",
+                    args={"group": group, "name": name, "cells": [clash, cell.id]},
+                )
             continue
         if not members:
             group_order.append(group)
@@ -591,6 +655,13 @@ def _variant_notes(cells: list[CellAnalysis], dag: Dag, groups: GroupConfig) -> 
                     f"defines {sorted(theirs)}",
                     annotation="variant",
                     line=line,
+                    args={
+                        "group": group,
+                        "name": cell.member.name,
+                        "defines": sorted(own),
+                        "sibling": sibling.member.name if sibling.member else None,
+                        "sibling_defines": sorted(theirs),
+                    },
                 )
                 break
         mode = groups.modes.get(group, "switch")
@@ -601,6 +672,7 @@ def _variant_notes(cells: list[CellAnalysis], dag: Dag, groups: GroupConfig) -> 
                 f"group `{group}` has mode {mode!r}; it runs as a switch",
                 annotation="variant",
                 line=line,
+                args={"group": group, "mode": mode},
             )
         active = groups.active.get(group)
         if mode == "sweep" and active:
@@ -610,6 +682,7 @@ def _variant_notes(cells: list[CellAnalysis], dag: Dag, groups: GroupConfig) -> 
                 f"group `{group}` is a sweep, so its active selection is ignored",
                 annotation="variant",
                 line=line,
+                args={"group": group, "active": active},
             )
         if mode != "sweep" and active:
             names = [name for _, name in members[group].members]
@@ -620,6 +693,7 @@ def _variant_notes(cells: list[CellAnalysis], dag: Dag, groups: GroupConfig) -> 
                     f"group `{group}` selects `{active}`, which no cell provides",
                     annotation="variant",
                     line=line,
+                    args={"group": group, "active": active},
                 )
 
 
@@ -683,27 +757,35 @@ def _wiring_phase(cells: list[CellAnalysis], groups: GroupConfig) -> Dag:
 
         for name, seed_id in cell.seeds.items():
             seed = cell_by_id.get(seed_id)
+            origin, origin_line = cell.seed_origins.get(name, (None, None))
             if seed is None:
-                cell.error("seed_unknown_cell", f"`{name}` is seeded from {seed_id!r}, no cell")
+                reason, message = "unknown", f"`{name}` is seeded from {seed_id!r}, no cell"
             elif seed_id == cell.id:
-                cell.error("seed_unknown_cell", f"`{name}` is seeded from the cell itself")
+                reason, message = "self", f"`{name}` is seeded from the cell itself"
             elif seed_id in inactive:
-                cell.error(
-                    "seed_unknown_cell", f"`{name}` is seeded from {seed_id}, an inactive variant"
+                reason, message = (
+                    "inactive",
+                    f"`{name}` is seeded from {seed_id}, an inactive variant",
                 )
             elif name not in seed.defines:
-                cell.error(
-                    "seed_unknown_cell",
-                    f"`{name}` is seeded from {seed_id}, which does not define it",
-                )
+                reason = "undefined"
+                message = f"`{name}` is seeded from {seed_id}, which does not define it"
             else:
                 dag.read_producers.setdefault(cell.id, {})[name] = seed_id
                 _wire(dag, seed_id, cell.id, name)
+                continue
+            cell.error(
+                "seed_unknown_cell",
+                message,
+                annotation=origin,
+                line=origin_line,
+                args={"name": name, "cell_id": seed_id, "reason": reason},
+            )
 
         dag.consumed_variables[cell.id].update(v for v in cell.kept if v in cell.defines)
 
         for upstream_id in cell.after:
-            line = _first_line(cell.directives, "after")
+            line = _naming_line(cell.directives, "after", upstream_id)
             if upstream_id == cell.id:
                 cell.note(
                     "after_self",
@@ -711,6 +793,7 @@ def _wiring_phase(cells: list[CellAnalysis], groups: GroupConfig) -> Dag:
                     "`@after` names this cell",
                     annotation="after",
                     line=line,
+                    args={"cell_id": upstream_id},
                 )
                 continue
             if upstream_id not in cell_by_id:
@@ -719,6 +802,7 @@ def _wiring_phase(cells: list[CellAnalysis], groups: GroupConfig) -> Dag:
                     f"`@after {upstream_id}` names no cell",
                     annotation="after",
                     line=line,
+                    args={"cell_id": upstream_id},
                 )
                 continue
             if upstream_id not in active_ids:
@@ -727,6 +811,7 @@ def _wiring_phase(cells: list[CellAnalysis], groups: GroupConfig) -> Dag:
                     f"`@after {upstream_id}` names a variant that is not active",
                     annotation="after",
                     line=line,
+                    args={"cell_id": upstream_id},
                 )
                 continue
             dag.edges.append(DagEdge(from_cell_id=upstream_id, to_cell_id=cell.id, variable=""))
@@ -781,7 +866,7 @@ def _wiring_phase(cells: list[CellAnalysis], groups: GroupConfig) -> Dag:
         message = "Cycle detected in DAG: " + (" → ".join(cycles[0]) if cycles else "unknown")
         for cid in active_cell_ids:
             if cid in on_cycle:
-                cell_by_id[cid].error("cycle", message)
+                cell_by_id[cid].error("cycle", message, args={"cycle": cycles[0] if cycles else []})
     dag.topological_order = _kahn(dag, active_cell_ids)
     return dag
 
@@ -810,6 +895,7 @@ def _fanout_notes(
                 f"`@per_variant {named}` names no sweep group the cell reads",
                 annotation="per_variant",
                 line=line,
+                args={"group": named},
             )
             return
         effective = named
@@ -830,6 +916,7 @@ def _fanout_notes(
                 f"`@per_variant` reads {', '.join(sorted(read_groups))}; name one",
                 annotation="per_variant",
                 line=line,
+                args={"groups": sorted(read_groups)},
             )
             return
         effective = next(iter(read_groups))
@@ -840,6 +927,7 @@ def _fanout_notes(
             f"group `{effective}` has one variant",
             annotation="per_variant",
             line=line,
+            args={"group": effective},
         )
 
 

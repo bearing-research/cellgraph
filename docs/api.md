@@ -288,5 +288,14 @@ inputs that exist only after its upstream runs.
 
 ## Diagnostics
 
-`Diagnostic(code, severity, message, cell, annotation=None, line=None)`, with
-`Severity.ERROR`, `WARN` or `INFO`. Only an error blocks planning.
+`Diagnostic(code, severity, message, cell, annotation=None, line=None, args={})`,
+with `Severity.ERROR`, `WARN` or `INFO`. Only an error blocks planning.
+
+`args` holds what cellgraph built the message from, so a host can word its own:
+the `key` and `suggestion` of `annotation_unknown`, the `cell_id` an `after_*`
+names, the `name`, `cell_id` and `reason` (`unknown`, `self`, `inactive` or
+`undefined`) of `seed_unknown_cell`, the `group` and the names of the variant and
+fan-out checks, and the `cycle` of a cycle. It does not count in equality.
+
+An `@after` problem is on the first `@after` line that names the id. A conflict or
+seed error is on the first line of the annotation whose effect caused it.
