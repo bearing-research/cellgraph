@@ -23,3 +23,13 @@ def test_a_syntax_error_is_a_diagnostic():
     analysis = cg.analyze([cg.Cell("a", "x = (")], cg.Vocabulary.core())
     assert [d.code for d in analysis.diagnostics] == ["syntax_error"]
     assert not analysis.cells["a"].plannable
+
+
+def test_the_memo_hands_out_its_own_lists():
+    """A memoized result is copied, so one caller's change is not the next caller's."""
+    analyzer = cg.get_language_analyzer("python")
+    first = analyzer.analyze(cg.Cell("a", "x = y", "python"))
+    first.defines.append("z")
+    first.references.clear()
+    second = analyzer.analyze(cg.Cell("b", "x = y", "python"))
+    assert (second.defines, second.references) == (["x"], ["y"])
