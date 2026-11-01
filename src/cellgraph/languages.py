@@ -30,7 +30,11 @@ class Analyzed:
 
 
 class LanguageAnalyzer(Protocol):
-    """What ``analyze`` needs of a language."""
+    """What ``analyze`` needs of a language.
+
+    An analyzer may also set ``directives = False`` for a language whose ``# @``
+    lines are not directives (markdown headings): its cells get no annotations.
+    """
 
     owns_key: bool
 
@@ -41,6 +45,11 @@ class LanguageAnalyzer(Protocol):
     def normalize(self, body: str) -> str:
         """The canonical text of a body whose directive lines are already removed."""
         ...
+
+
+def reads_directives(analyzer: LanguageAnalyzer) -> bool:
+    """Whether *analyzer*'s language has a directive block (``directives``, default True)."""
+    return bool(getattr(analyzer, "directives", True))
 
 
 def strip_lines(source: str) -> str:

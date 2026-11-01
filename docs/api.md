@@ -55,15 +55,21 @@ Annotation(
 
 - `parse(directives)` gets every directive of `key` and of `also_reads`, in source
   order. It raises `AnnotationError(message, code=None, line=None)` for a value it
-  cannot read; the code defaults to `<key>_unreadable`.
+  cannot read; the code defaults to `<key>_unreadable` and the line to the
+  annotation's first. To report several problems, it raises an `ExceptionGroup` of
+  `AnnotationError`s, and each becomes a diagnostic; any other exception in the
+  group propagates. A parser that can read some lines and not others returns
+  `Partial(value, errors)`: the annotation is present with `value`, and each error
+  is a diagnostic.
 - `effects(value)` returns effects. It runs only when the annotation is present.
 - `in_key`: a present annotation adds the field `key` to the definition key, with
   the value `encode(value)`, or `value` itself when that is canonical (None, bool,
   int, finite float, str, and lists and str-keyed dicts of these). A value that is
   not canonical is the error `<key>_unencodable`.
 - `validate(value, ValidationContext(cell, defines, references, host))` returns
-  diagnostics. It runs after names are known; an `AnnotationError` it raises
-  becomes `<key>_invalid`.
+  diagnostics. It runs after names are known; an `AnnotationError` it raises (or
+  a group of them) becomes `<key>_invalid`, on the annotation's first line unless
+  the error names one.
 
 Parsers: `scalar(convert=str)` (the last line wins; empty or unconvertible is an
 error), `flag()` (bare, or `on|off|true|false|yes|no|1|0`), and `stacked(item)`
@@ -96,6 +102,10 @@ class LanguageAnalyzer(Protocol):
     def analyze(self, cell) -> Analyzed: ...
     def normalize(self, body: str) -> str: ...
 ```
+
+An analyzer may also set `directives = False` for a language whose `# @` lines are
+not directives, such as markdown headings: its cells get no annotations, and the
+`cellgraph-1` normalization keeps those lines. `reads_directives(analyzer)` tells.
 
 `Analyzed(defines, references, builtin_references, mutation_defines, error)`.
 `error` is a body that cannot be read, and becomes the error `syntax_error`.

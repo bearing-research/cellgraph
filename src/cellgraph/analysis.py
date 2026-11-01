@@ -36,8 +36,13 @@ from cellgraph.effects import (
     Seeds,
 )
 from cellgraph.grammar import Directive
-from cellgraph.languages import Analyzed, LanguageAnalyzer, registered_analyzers
-from cellgraph.vocabulary import AnnotationError, ValidationContext, Vocabulary
+from cellgraph.languages import (
+    Analyzed,
+    LanguageAnalyzer,
+    reads_directives,
+    registered_analyzers,
+)
+from cellgraph.vocabulary import AnnotationError, Partial, ValidationContext, Vocabulary
 
 NORMALIZE_LEGACY_1 = "legacy-1"
 NORMALIZE_CELLGRAPH_1 = "cellgraph-1"
@@ -324,6 +329,27 @@ def _is_canonical(value: Any) -> bool:
     return False
 
 
+def _annotation_errors(exc: AnnotationError | ExceptionGroup) -> list[AnnotationError]:
+    """The errors a parser or validator raised: one, or an ``ExceptionGroup`` of them."""
+    if isinstance(exc, AnnotationError):
+        return [exc]
+    matched, rest = exc.split(AnnotationError)
+    if rest is not None:
+        raise rest
+    assert matched is not None
+    return _leaves(matched)
+
+
+def _leaves(group: BaseExceptionGroup) -> list[AnnotationError]:
+    out: list[AnnotationError] = []
+    for exc in group.exceptions:
+        if isinstance(exc, BaseExceptionGroup):
+            out.extend(_leaves(exc))
+        elif isinstance(exc, AnnotationError):
+            out.append(exc)
+    return out
+
+
 def _first_line(directives: list[Directive], key: str) -> int | None:
     return next((d.line for d in directives if d.key == key), None)
 
@@ -349,7 +375,8 @@ def _parse_phase(
 ) -> tuple[CellAnalysis, Analyzed]:
     """Phase 1: the body's analysis, and every annotation's parser."""
     ca = CellAnalysis(id=cell.id, language=cell.language, source=cell.source)
-    ca.directives = vocabulary.grammar.directives(cell.source)
+    if reads_directives(analyzer):
+        ca.directives = vocabulary.grammar.directives(cell.source)
 
     by_owner: dict[str, list[Directive]] = {}
     for directive in ca.directives:
@@ -373,14 +400,24 @@ def _parse_phase(
             continue
         try:
             value = annotation.parse(directives)
-        except AnnotationError as exc:
-            ca.error(
-                exc.code or f"{directives[0].key}_unreadable",
-                str(exc),
-                annotation=annotation.key,
-                line=exc.line if exc.line is not None else directives[0].line,
-            )
+        except (AnnotationError, ExceptionGroup) as raised:
+            for exc in _annotation_errors(raised):
+                ca.error(
+                    exc.code or f"{directives[0].key}_unreadable",
+                    str(exc),
+                    annotation=annotation.key,
+                    line=exc.line if exc.line is not None else directives[0].line,
+                )
             continue
+        if isinstance(value, Partial):
+            for exc in value.errors:
+                ca.error(
+                    exc.code or f"{directives[0].key}_unreadable",
+                    str(exc),
+                    annotation=annotation.key,
+                    line=exc.line if exc.line is not None else directives[0].line,
+                )
+            value = value.value
         ca.annotations[annotation.key] = value
         if annotation.in_key:
             encoded = annotation.encode(value) if annotation.encode is not None else value
@@ -927,13 +964,15 @@ def analyze(
                 ca.diagnostics.extend(
                     annotation.validate(ca.annotations[annotation.key], context_view)
                 )
-            except AnnotationError as exc:
-                ca.error(
-                    exc.code or f"{annotation.key}_invalid",
-                    str(exc),
-                    annotation=annotation.key,
-                    line=exc.line,
-                )
+            except (AnnotationError, ExceptionGroup) as raised:
+                first = next((d.line for d in ca.directives if d.key in annotation.keys), None)
+                for exc in _annotation_errors(raised):
+                    ca.error(
+                        exc.code or f"{annotation.key}_invalid",
+                        str(exc),
+                        annotation=annotation.key,
+                        line=exc.line if exc.line is not None else first,
+                    )
 
     graph = _wiring_phase(analyses, groups)
     _variant_notes(analyses, graph, groups)

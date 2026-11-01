@@ -36,6 +36,23 @@ class AnnotationError(ValueError):
 
 
 @dataclass(frozen=True)
+class Partial:
+    """What a parser returns when part of an annotation reads: the value, and the errors.
+
+    The annotation is present with ``value`` (its effects and key field apply) and
+    each error becomes a diagnostic, so the cell is not plannable. For lines that
+    cannot be read beside lines that can, as Strata keeps the readable ones.
+    """
+
+    value: Any
+    errors: tuple[AnnotationError, ...]
+
+    def __init__(self, value: Any, errors: Iterable[AnnotationError]) -> None:
+        object.__setattr__(self, "value", value)
+        object.__setattr__(self, "errors", tuple(errors))
+
+
+@dataclass(frozen=True)
 class ValidationContext:
     """What a validator sees: the cell, its names after effects, and the host's context."""
 

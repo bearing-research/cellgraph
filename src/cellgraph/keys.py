@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any
 
 from cellgraph import python
 from cellgraph.effects import Input
+from cellgraph.languages import reads_directives
 
 if TYPE_CHECKING:
     from cellgraph.analysis import Analysis, CellAnalysis
@@ -155,8 +156,11 @@ def definition_key(analysis: Analysis, cell: CellAnalysis) -> tuple[str, str]:
         # Strata's compute_source_hash body: the whole source, whatever the language.
         normalized = python.normalize(cell.source)
     else:
-        body = analysis.vocabulary.grammar.strip_directives(cell.source)
-        normalized = analysis.analyzers[cell.language].normalize(body)
+        analyzer = analysis.analyzers[cell.language]
+        body = cell.source
+        if reads_directives(analyzer):
+            body = analysis.vocabulary.grammar.strip_directives(body)
+        normalized = analyzer.normalize(body)
     fields = cell.key_fields
     if analysis.digest == "legacy-1":
         text = normalized
