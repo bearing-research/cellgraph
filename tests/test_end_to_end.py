@@ -182,5 +182,25 @@ def test_a_cycle_leaves_the_rest_plannable(run):
     assert plannable == {"c2"}
     assert analysis.dag.topological_order == ["c2"]
     assert analysis.plan("c2", ready=lambda _: False) == ["c2"]
-    assert analysis.cells["c2"].definition_key is not None
-    assert analysis.cells["c3"].definition_key is None
+    # Every cell has a definition key; only the cells the cycle reaches have no
+    # execution key.
+    assert all(ca.definition_key is not None for ca in analysis.cells.values())
+    assert analysis.execution_key("c2", published=published(), env_hash=ENV).digest
+    for cell_id in ("c0", "c1", "c3"):
+        with pytest.raises(cg.NotPlannableError):
+            analysis.execution_key(cell_id, published=published(), env_hash=ENV)
+
+
+def test_the_binding_rule_is_what_the_keys_read(run):
+    analysis = fanout(run)
+    # An instance reads its own variant of its own group, as a scalar.
+    assert analysis.variant_read("c2", "c0", "m", "small") == cg.VariantRead(
+        ("small",), scalar=True, fanout=False
+    )
+    # The other member gives that instance nothing.
+    assert analysis.variant_read("c2", "c1", "m", "small") == cg.VariantRead(
+        (), scalar=True, fanout=False
+    )
+    # A plain reader of a fan-out reads every instance, as a dict.
+    read = analysis.variant_read("c4", "c3", "s")
+    assert read.fanout and not read.scalar and set(read.variants) == {"small", "big"}

@@ -3,6 +3,7 @@
 import ast
 import hashlib
 import json
+from collections.abc import Mapping
 
 import pytest
 from test_languages import Words
@@ -224,7 +225,47 @@ def test_a_host_keyed_language_gets_no_digest(vocab):
     )
 
 
-def test_an_unplannable_cell_has_no_key(run):
-    analysis = run("# @nocache maybe\nx = 1")
-    with pytest.raises(cg.NotPlannableError):
-        analysis.execution_key("c0", published=published(), env_hash=ENV)
+def test_a_blocked_cell_and_its_dependents_are_keyed(run):
+    """A result cached under a blocked cell's key is still its result."""
+    analysis = run("# @nocache maybe\nx = 1", "y = x")
+    assert not analysis.cells["c0"].plannable and not analysis.cells["c1"].plannable
+    blocked = analysis.execution_key("c0", published=published(), env_hash=ENV)
+    assert blocked.digest == strata_provenance([], analysis.cells["c0"].definition_key, ENV)
+    below = analysis.execution_key("c1", published=published(c0=out(x="h0")), env_hash=ENV)
+    assert below.digest == strata_provenance(["h0"], analysis.cells["c1"].definition_key, ENV)
+
+
+def test_the_shadowed_reads(run):
+    analysis = run("x = 1\nz = 1", "x = 2", "y = x + z")
+    assert analysis.shadowed_reads("c2") == {"x"}
+    assert analysis.shadowed_reads("c1") == set()
+
+
+class _Lookups(Mapping):
+    """Outputs that note which ones were looked up."""
+
+    def __init__(self, **refs):
+        self.refs = refs
+        self.looked_up: list[str] = []
+
+    def __getitem__(self, key):
+        self.looked_up.append(key)
+        return self.refs[key]
+
+    def __iter__(self):
+        return iter(self.refs)
+
+    def __len__(self):
+        return len(self.refs)
+
+
+def test_an_output_is_looked_up_only_when_it_counts(run):
+    analysis = run("# @nocache\nx = 1\nunread = 2", "y = x")
+    outputs = _Lookups(
+        x=cg.OutputRef(cg.Provenance("h0"), content_digest="d0"),
+        unread=cg.OutputRef(cg.Provenance("h1"), content_digest="d1"),
+    )
+    analysis.execution_key(
+        "c1", published=published(c0=cg.Published(outputs=outputs)), env_hash=ENV
+    )
+    assert outputs.looked_up == ["x"]

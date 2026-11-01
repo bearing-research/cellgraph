@@ -182,13 +182,22 @@ wired, planned and keyed.
   `blocking(cell_id)`: the error diagnostics of the cells that keep `cell_id` from
   planning.
 - `execution_key(...)` and `plan(...)`, described below.
+- `variant_read(cell_id, upstream_id, var, instance=None)`: what the cell (or one
+  of its instances) reads of `var` from `upstream_id` when a sweep makes it, as
+  `VariantRead(variants, scalar, fanout)`, or None. `scalar` is an instance's own
+  group, read as its variant's value; otherwise the `{variant: value}` dict.
+  `fanout` says the variants are one fan-out cell's instances. No variants is
+  another variant's member, which the cell does not read. The execution key reads
+  by this rule, so a host that loads inputs by it loads what the key covers.
+- `shadowed_reads(cell_id)`: the names the cell reads that an upstream defines but
+  is not wired to give it; each is read from its wired producer only.
 
 `CellAnalysis` carries, among others:
 
 - `annotations` (the parsed values), `effects`, `defines`, `references`,
   `builtin_references`, `bound`, `inputs`, `nocache`;
 - `key_fields`, `diagnostics`, `plannable`, `blocked_by`;
-- `normalized` and `definition_key` (None when the cell is not plannable).
+- `normalized` and `definition_key`, for every cell.
 
 `Dag` carries:
 
@@ -250,7 +259,13 @@ Results:
   both.
 - `HostKeyed(parts)`: for a language with `owns_key=False`.
 
-A cell that is not plannable raises `NotPlannableError`.
+A blocked cell is keyed too, as are the cells downstream of it: a result cached
+under its key is still its result, and whether it may run is `plannable`. A cell a
+cycle or variant collision reaches (on it or upstream) raises
+`NotPlannableError(cell_id, diagnostics)` with those structural diagnostics.
+
+`outputs` is read lazily: a variable's ref is looked up only when the key counts
+it, so a host can pass a mapping that reads its store on demand.
 
 `parts` is versioned by `parts_schema` (`PARTS_SCHEMA`, now 1) and holds:
 

@@ -295,6 +295,7 @@ class CellAnalysis:
     plannable: bool = True
     # The cells whose own errors keep this one from planning (itself included).
     blocked_by: list[str] = field(default_factory=list)
+    # Set by ``analyze`` for every cell, plannable or not.
     definition_key: str | None = None
     normalized: str | None = None
 
@@ -997,6 +998,20 @@ class Analysis:
 
         return execution_key(self, cell_id, **kwargs)
 
+    def variant_read(
+        self, cell_id: str, upstream_id: str, var: str, instance: str | None = None
+    ) -> Any:
+        """See ``cellgraph.keys.variant_read``."""
+        from cellgraph.keys import variant_read
+
+        return variant_read(self, cell_id, upstream_id, var, instance)
+
+    def shadowed_reads(self, cell_id: str) -> set[str]:
+        """See ``cellgraph.keys.shadowed_reads``."""
+        from cellgraph.keys import shadowed_reads
+
+        return shadowed_reads(self, cell_id)
+
     def plan(self, target: str, ready: Callable[[str], bool]) -> list[str]:
         """See ``cellgraph.plan.plan``."""
         from cellgraph.plan import plan
@@ -1096,6 +1111,5 @@ def analyze(
         digest=digest,
     )
     for ca in analyses:
-        if ca.plannable:
-            ca.normalized, ca.definition_key = definition_key(analysis, ca)
+        ca.normalized, ca.definition_key = definition_key(analysis, ca)
     return analysis

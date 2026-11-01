@@ -2,6 +2,11 @@
 
 ## 0.2.0 - 2026-11-01
 
+- A blocked cell and the cells downstream of it are keyed: every cell has a
+  definition key, and `execution_key` refuses only a cell a cycle or variant
+  collision reaches. `Analysis.variant_read` and `Analysis.shadowed_reads` give the
+  rule the key reads its upstreams by, so a host loads what the key covers. An
+  upstream's `outputs` is looked up only for the variables the key counts (#10).
 - The Python analyzer and `normalize` remember the last 4096 sources they read, so
   a notebook analyzed again after an edit pays again only for the cells that changed.
   The analyzer hands each caller its own lists (#9).
