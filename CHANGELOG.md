@@ -2,6 +2,9 @@
 
 ## 0.2.0 - 2026-11-01
 
+- The Python analyzer and `normalize` remember the last 4096 sources they read, so
+  a notebook analyzed again after an edit pays again only for the cells that changed.
+  The analyzer hands each caller its own lists (#9).
 - `Diagnostic.args`: what the message was built from, such as the cell id an
   `@after` names, so a host can word a finding its own way. It does not count in
   equality or hashing (#7).

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import ast
 import builtins
+import functools
 import symtable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -641,11 +642,26 @@ def analyze_cell(source: str) -> CellAnalysis:
     )
 
 
+# A notebook is analyzed again on every edit with most cells unchanged, so the
+# per-source work is kept for the sources seen last.
+_MEMO_SIZE = 4096
+
+
+@functools.lru_cache(maxsize=_MEMO_SIZE)
+def _analyzed(source: str) -> CellAnalysis:
+    return analyze_cell(source)
+
+
 def normalize(source: str) -> str:
     """Canonical text for *source*: its AST round trip, so comments and layout drop out.
 
     Source that does not parse falls back to the line strip, which keeps comments.
     """
+    return _normalized(source)
+
+
+@functools.lru_cache(maxsize=_MEMO_SIZE)
+def _normalized(source: str) -> str:
     try:
         return ast.unparse(ast.parse(source))
     except SyntaxError:
@@ -659,7 +675,8 @@ class PythonAnalyzer:
     owns_key = True
 
     def analyze(self, cell: Cell) -> Analyzed:
-        result = analyze_cell(cell.source)
+        # Memoized: the lists are copied, so the caller may change its own.
+        result = _analyzed(cell.source)
         return Analyzed(
             defines=list(result.defines),
             references=list(result.references),
