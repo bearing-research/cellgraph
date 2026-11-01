@@ -2,6 +2,7 @@
 
 ## 0.1.0 - 2026-11-01
 
+- The package ships `py.typed`, so type checkers read its annotations (#6).
 - `directives` on a language analyzer is a bool or a frozenset of keys; a language
   with a set reads only those keys, and its other `# @` lines are plain text.
   `directive_keys(analyzer)` replaces `reads_directives` (#3).
