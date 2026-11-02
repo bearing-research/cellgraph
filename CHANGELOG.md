@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 - 2026-11-02
 
 - `@each <name> in <source> [key=<column>] [glob=<pattern>]`, a core annotation: a
   cell that runs once per item the host lists, from an upstream variable or a name

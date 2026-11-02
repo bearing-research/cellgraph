@@ -1,6 +1,6 @@
 [project]
 name = "cellgraph"
-version = "0.2.0"
+version = "0.3.0"
 description = "The cell graph of a notebook or script: annotations with a host-supplied vocabulary, analysis, the DAG, and the keys that say whether a cell must run."
 readme = "README.md"
 requires-python = ">=3.12"
