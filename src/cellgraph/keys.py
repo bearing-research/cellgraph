@@ -142,7 +142,11 @@ class Unavailable:
 
 @dataclass(frozen=True)
 class HostKeyed:
-    """The host computes this cell's key (``owns_key=False``)."""
+    """The host computes this cell's key (``owns_key=False``).
+
+    ``parts`` holds the upstream components the cell reads, as a key would, and no
+    inputs: those are the host's to key.
+    """
 
     parts: dict[str, Any] | None = None
 
@@ -174,15 +178,23 @@ def definition_key(analysis: Analysis, cell: CellAnalysis) -> tuple[str, str]:
 
 
 @dataclass(frozen=True)
-class _VariantRead:
+class VariantRead:
+    """What a cell reads of one variable a sweep makes: the variants, and how.
+
+    ``scalar``: a fan-out instance's own group, read as that variant's value; otherwise
+    the ``{variant: value}`` dict. ``fanout``: the variants are one fan-out cell's
+    instances rather than the members of a group. No variants: another variant's
+    member, which this cell does not read.
+    """
+
     variants: tuple[str, ...]
     scalar: bool
     fanout: bool
 
 
-def _variant_read(
-    analysis: Analysis, cell_id: str, upstream_id: str, var: str, instance: str | None
-) -> _VariantRead | None:
+def variant_read(
+    analysis: Analysis, cell_id: str, upstream_id: str, var: str, instance: str | None = None
+) -> VariantRead | None:
     """What *cell_id* (or its *instance*) reads of *var* from *upstream_id*, if a sweep makes it."""
     from cellgraph.analysis import SweepProducer
 
@@ -198,15 +210,33 @@ def _variant_read(
         names = (
             (instance,) if own and instance is not None else tuple(n for n, _ in producer.variants)
         )
-        return _VariantRead(variants=names, scalar=own, fanout=True)
+        return VariantRead(variants=names, scalar=own, fanout=True)
     member = next((name for name, cid in producer.variants if cid == upstream_id), None)
     if member is None:
         return None
     if own:
-        return _VariantRead(
+        return VariantRead(
             variants=(member,) if member == instance else (), scalar=True, fanout=False
         )
-    return _VariantRead(variants=(member,), scalar=False, fanout=False)
+    return VariantRead(variants=(member,), scalar=False, fanout=False)
+
+
+def shadowed_reads(analysis: Analysis, cell_id: str) -> set[str]:
+    """Names *cell_id* reads that an upstream defines but is not wired to give it.
+
+    Such a name is read from its wired producer only.
+    """
+    graph = analysis.graph
+    cell = analysis.cells[cell_id]
+    reads = set(cell.references) | set(cell.builtin_references)
+    shadowed: set[str] = set()
+    for upstream_id in graph.cell_upstream.get(cell_id, []):
+        upstream = analysis.cells.get(upstream_id)
+        if upstream is not None:
+            shadowed |= (reads & set(upstream.defines)) - graph.wired_variables(
+                cell_id, upstream_id
+            )
+    return shadowed
 
 
 class _Assembly:
@@ -256,14 +286,7 @@ def _upstream(
         return assembly
 
     reads = set(cell.references) | set(cell.builtin_references)
-    # A name several upstreams define is read from its wired producer only.
-    shadowed: set[str] = set()
-    for upstream_id in upstream_ids:
-        upstream = analysis.cells.get(upstream_id)
-        if upstream is not None:
-            shadowed |= (reads & set(upstream.defines)) - graph.wired_variables(
-                cell_id, upstream_id
-            )
+    shadowed = shadowed_reads(analysis, cell_id)
 
     sweep_buckets: dict[str, list[tuple[str, str]]] = {}
     for upstream_id in upstream_ids:
@@ -274,19 +297,17 @@ def _upstream(
         wired = graph.wired_variables(cell_id, upstream_id) if shadowed else set()
         snapshot = published(upstream_id)
 
-        items: list[tuple[str | None, Any]] = list(snapshot.outputs.items())
-        if not items and snapshot.cell_ref is not None:
-            items = [(None, snapshot.cell_ref)]
+        names = list(snapshot.outputs)
+        if not names and snapshot.cell_ref is not None:
+            value = assembly.component(snapshot.cell_ref, by_content, f"cell:{upstream_id}")
+            if value is not None:
+                assembly.add(f"cell:{upstream_id}", value)
 
-        for var, ref in items:
-            if var is None:
-                value = assembly.component(ref, by_content, f"cell:{upstream_id}")
-                if value is not None:
-                    assembly.add(f"cell:{upstream_id}", value)
-                continue
+        # An output is looked up only once it counts, so a host's mapping can be lazy.
+        for var in names:
             if by_content and var not in reads:
                 continue
-            read = _variant_read(analysis, cell_id, upstream_id, var, instance)
+            read = variant_read(analysis, cell_id, upstream_id, var, instance)
             if read is not None and read.fanout:
                 parts = []
                 for name in read.variants:
@@ -304,7 +325,9 @@ def _upstream(
                 continue
             if read is not None and not read.variants:
                 continue  # another variant's member
-            value = assembly.component(ref, by_content, f"output:{upstream_id}.{var}")
+            value = assembly.component(
+                snapshot.outputs[var], by_content, f"output:{upstream_id}.{var}"
+            )
             if value is None:
                 continue
             if read is not None:
@@ -343,13 +366,20 @@ def execution_key(
     ``published(cell_id)`` is what an upstream published; ``resolve`` has one resolver
     per input kind. ``instance=None`` on a fan-out cell is its cell-level key.
     """
-    from cellgraph.analysis import NotPlannableError
+    from cellgraph.analysis import STRUCTURAL_CODES, NotPlannableError
 
     cell = analysis.cells[cell_id]
-    if not cell.plannable:
-        raise NotPlannableError(cell_id, analysis.blocking(cell_id))
-    if not analysis.analyzers[cell.language].owns_key:
-        return HostKeyed()
+    # A blocked cell is keyed too: a result cached under its key is still its result.
+    # One a cycle or a variant collision reaches has no sound upstreams to key it on.
+    structural = [
+        d
+        for blocker in cell.blocked_by
+        for d in analysis.cells[blocker].diagnostics
+        if d.code in STRUCTURAL_CODES
+    ]
+    if structural:
+        raise NotPlannableError(cell_id, structural)
+    owns_key = analysis.analyzers[cell.language].owns_key
     fanout = analysis.graph.fanout_cells.get(cell_id)
     if instance is not None:
         if fanout is None:
@@ -361,7 +391,8 @@ def execution_key(
     assembly = _upstream(analysis, cell_id, instance, published)
     inputs: list[tuple[str, str, str]] = []
     resolvers = resolve or {}
-    for spec in cell.inputs:
+    # A host-keyed cell's inputs are the host's to key.
+    for spec in cell.inputs if owns_key else []:
         if spec.kind not in resolvers:
             raise ValueError(f"no resolver for {spec.kind!r} inputs (cell {cell_id})")
         result = resolvers[spec.kind](spec)
@@ -391,6 +422,8 @@ def execution_key(
         "upstream": sorted([address, value] for address, value in assembly.components),
         "inputs": sorted([kind, name, component] for kind, name, component in inputs),
     }
+    if not owns_key:
+        return HostKeyed(parts=parts)
     if assembly.unresolved:
         return Unavailable(
             reason="unresolved: " + ", ".join(assembly.unresolved),
