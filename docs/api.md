@@ -41,7 +41,7 @@ as a string or an iterable.
 | `After(cell_ids)` | ordering edges with no variable |
 | `Seeds(cell_id, name)` | read `name` from `cell_id` instead of its latest earlier producer |
 | `Member(group, name)` | member `name` of variant group `group` |
-| `FanOut(group=None)` | run once per member of `group`, or of the one sweep group the cell reads |
+| `FanOut(group=None, over=None)` | run once per member of `group`, or of the one sweep group the cell reads; with `over`, once per item the host lists from that name |
 | `Input(kind, name, spec=None)` | an external input; one per `(kind, name)` in a cell; `spec` is the resolver's and does not affect equality |
 | `NoCache()` | never served from cache; a downstream key follows this cell's bytes |
 
@@ -87,7 +87,8 @@ Vocabulary(annotations, cell_effects=None, grammar=GRAMMAR)
   the parsed value of each present annotation. It is for effects that come from
   host configuration, such as mounts declared outside the source.
 - `Vocabulary.core()` holds `name` (metadata), `after`, `nocache`,
-  `variant <group> <name>` and `per_variant [group]` (in the key).
+  `variant <group> <name>`, `per_variant [group]` and
+  `each <name> in <source> [key=<column>] [glob=<pattern>]` (in the key).
 - `vocab[key]`, `key in vocab`, `vocab.keys` (also-read keys included),
   `vocab.owner(directive_key)`, `vocab.without(*keys)`, `vocab.replace(key, **changes)`.
 - `vocab.set_directive(source, key, value)` refuses a stacked annotation's key,
@@ -165,7 +166,7 @@ The phases, each over every cell before the next:
    - every reference goes to its latest earlier producer, or to every member of a
      sweep;
    - seeds, `after` (`after_self`, `after_unknown_cell`, `after_inactive_variant`)
-     and fan-outs (`per_variant_*`) are applied;
+     and fan-outs (`per_variant_*`, `each_*`) are applied;
    - cycles are `cycle` on every cell on one, with the message
      `Cycle detected in DAG: a → b → a`.
 
@@ -245,6 +246,11 @@ analysis.execution_key(cell_id, *, instance=None, published, resolve=None, env_h
 - `resolve[kind](input) -> Resolved(identity, fingerprint, legacy=None)` or
   `Unavailable`; `Resolver` is that callable's type. Under the `legacy-1` digest, `legacy` is the component itself and
   is required.
+- `instance` is an `Item(key, digest)` on an `@each` cell: the key is built with this
+  item in place of its source, under `each:<source>` in `upstream`, so changing one
+  item leaves the others' keys alone. Which items there are, and what a digest covers,
+  are the host's. `instance=None` is the cell-level key, over the whole source; a cell
+  reading the output sees one ordinary output.
 - `instance` names one variant of a fan-out cell. It reads its own group's
   variable as a scalar of that variant, and its key is
   `derive_subkey(cell key, "variant=<name>")` under `legacy-1`.
@@ -273,7 +279,7 @@ it, so a host can pass a mapping that reads its store on demand.
 - `digest`, `scope` (`cell` or `instance`), `instance`, `definition_key`, `fields`,
   `env_hash`;
 - `upstream`: `[address, component]` pairs, with addresses `output:`, `cell:`,
-  `wired:`, `variant:`, `sweep:` and `instances:`;
+  `wired:`, `variant:`, `sweep:`, `instances:` and `each:`;
 - `inputs`: `[kind, name, component]`.
 
 ```

@@ -136,6 +136,8 @@ class Dag:
     inactive_cells: set[str] = field(default_factory=set)
     wired_inputs: dict[str, dict[str, set[str]]] = field(default_factory=dict)
     fanout_cells: dict[str, SweepProducer] = field(default_factory=dict)
+    # An ``@each`` cell: the name its items come from. Not a sweep: a reader sees one output.
+    each_cells: dict[str, str] = field(default_factory=dict)
     read_producers: dict[str, dict[str, str | SweepProducer]] = field(default_factory=dict)
 
     def wired_variables(self, consumer_id: str, producer_id: str) -> set[str]:
@@ -511,6 +513,20 @@ def _names_phase(ca: CellAnalysis, analyzed: Analyzed) -> None:
             args={"name": name},
         )
 
+    for effect in ca.effects:
+        if isinstance(effect, FanOut) and effect.over is not None:
+            # An instance's key leaves the source out, so the body must not read it whole.
+            if effect.over in analyzed.references:
+                ca.error(
+                    "each_reads_source",
+                    f"the cell reads `{effect.over}` itself, which every item's result would "
+                    "then depend on; read each item, or compute it in a cell before this one",
+                    annotation="each",
+                    args={"source": effect.over},
+                )
+            elif effect.over not in bound and effect.over not in references:
+                references.append(effect.over)
+
     ca.defines = defines
     ca.references = [name for name in references if name not in bound]
     ca.builtin_references = [name for name in analyzed.builtin_references if name not in bound]
@@ -555,7 +571,7 @@ def _names_phase(ca: CellAnalysis, analyzed: Analyzed) -> None:
             if ca.fanout is not None and ca.fanout != effect:
                 ca.error(
                     "fanout_conflict",
-                    "the cell fans out over two groups",
+                    "the cell fans out two ways",
                     annotation=origin,
                     line=origin_line,
                 )
@@ -823,7 +839,10 @@ def _wiring_phase(cells: list[CellAnalysis], groups: GroupConfig) -> Dag:
 
         is_sweep_member = cell.id in sweep_member_group
         fanout_group: str | None = None
-        if cell.fanout is not None:
+        if cell.fanout is not None and cell.fanout.over is not None:
+            dag.each_cells[cell.id] = cell.fanout.over
+            _each_notes(cell, dag)
+        elif cell.fanout is not None:
             read_groups = dag.sweep_groups_read(cell.id)
             named = cell.fanout.group
             if named is not None:
@@ -870,6 +889,39 @@ def _wiring_phase(cells: list[CellAnalysis], groups: GroupConfig) -> Dag:
                 cell_by_id[cid].error("cycle", message, args={"cycle": cycles[0] if cycles else []})
     dag.topological_order = _kahn(dag, active_cell_ids)
     return dag
+
+
+def _each_notes(cell: CellAnalysis, dag: Dag) -> None:
+    """What an ``@each`` cell cannot iterate, or be."""
+    assert cell.fanout is not None and cell.fanout.over is not None
+    source = cell.fanout.over
+    line = _first_line(cell.directives, "each")
+    if cell.member is not None:
+        cell.error(
+            "each_on_variant_member",
+            "a variant member cannot also run once per item",
+            annotation="each",
+            line=line,
+        )
+    if source in cell.bound:
+        return
+    producer = dag.read_producer(cell.id, source)
+    if isinstance(producer, SweepProducer):
+        cell.error(
+            "each_over_sweep",
+            f"`{source}` comes from a sweep, which has no one collection to iterate",
+            annotation="each",
+            line=line,
+            args={"source": source},
+        )
+    elif producer is None:
+        cell.error(
+            "each_unknown_source",
+            f"no cell before this one defines `{source}`, and the cell does not bind it",
+            annotation="each",
+            line=line,
+            args={"source": source},
+        )
 
 
 def _fanout_notes(
@@ -950,6 +1002,7 @@ def _restrict(graph: Dag, keep: set[str]) -> Dag:
             if c in keep
         },
         fanout_cells={c: p for c, p in graph.fanout_cells.items() if c in keep},
+        each_cells={c: s for c, s in graph.each_cells.items() if c in keep},
         read_producers={c: dict(r) for c, r in graph.read_producers.items() if c in keep},
     )
     active = [cid for cid in ids if cid not in graph.inactive_cells]

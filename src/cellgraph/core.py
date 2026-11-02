@@ -1,4 +1,5 @@
-"""The core vocabulary: ``@name``, ``@after``, ``@nocache``, ``@variant``, ``@per_variant``.
+"""The core vocabulary: ``@name``, ``@after``, ``@nocache``, ``@variant``, ``@per_variant``,
+``@each``.
 
 The parsing rules and diagnostic codes are Strata's (``annotations.py`` and
 ``annotation_validation.py``), which these were ported from.
@@ -6,7 +7,7 @@ The parsing rules and diagnostic codes are Strata's (``annotations.py`` and
 
 from __future__ import annotations
 
-from cellgraph.effects import After, FanOut, Member, NoCache
+from cellgraph.effects import After, Binds, FanOut, Member, NoCache
 from cellgraph.grammar import Directive
 from cellgraph.vocabulary import Annotation, AnnotationError, flag, mark_stacked, scalar
 
@@ -56,6 +57,36 @@ def _parse_per_variant(directives: list[Directive]) -> str | None:
     return tokens[0] if tokens else None
 
 
+def _parse_each(directives: list[Directive]) -> dict[str, str]:
+    """``# @each <name> in <source> [key=<column>] [glob=<pattern>]``; the last line wins."""
+    value: dict[str, str] = {}
+    for directive in directives:
+        tokens = directive.value.split()
+        value = {}
+        if len(tokens) >= 3 and tokens[1] == "in":
+            value = {"name": tokens[0], "source": tokens[2]}
+            for token in tokens[3:]:
+                option, _, setting = token.partition("=")
+                if option not in ("key", "glob") or not setting or option in value:
+                    value = {}
+                    break
+                value[option] = setting
+        if not value or not (value["name"].isidentifier() and value["source"].isidentifier()):
+            raise AnnotationError(
+                f"`@each {directive.value}`: expected `@each <name> in <source> "
+                "[key=<column>] [glob=<pattern>]`, with the name and source Python identifiers",
+                code="each_malformed",
+                line=directive.line,
+            )
+        if value["name"] == value["source"]:
+            raise AnnotationError(
+                f"`@each {directive.value}`: an item cannot have its source's name",
+                code="each_malformed",
+                line=directive.line,
+            )
+    return value
+
+
 def core_annotations() -> list[Annotation]:
     return [
         Annotation("name", parse=scalar(str), in_key=False),
@@ -83,5 +114,11 @@ def core_annotations() -> list[Annotation]:
             "per_variant",
             parse=_parse_per_variant,
             effects=lambda group: [FanOut(group)],
+        ),
+        # What it iterates, and how an item is named, decide what each instance is.
+        Annotation(
+            "each",
+            parse=_parse_each,
+            effects=lambda each: [Binds(each["name"]), FanOut(over=each["source"])],
         ),
     ]
