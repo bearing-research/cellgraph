@@ -243,7 +243,7 @@ analysis.execution_key(cell_id, *, instance=None, published, resolve=None, env_h
   `derive_subkey(hash, "content=<digest>")`, and only for the variables the reader
   reads.
 - `resolve[kind](input) -> Resolved(identity, fingerprint, legacy=None)` or
-  `Unavailable`. Under the `legacy-1` digest, `legacy` is the component itself and
+  `Unavailable`; `Resolver` is that callable's type. Under the `legacy-1` digest, `legacy` is the component itself and
   is required.
 - `instance` names one variant of a fan-out cell. It reads its own group's
   variable as a scalar of that variant, and its key is

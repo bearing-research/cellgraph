@@ -7,7 +7,8 @@
   collision reaches. `Analysis.variant_read` and `Analysis.shadowed_reads` give the
   rule the key reads its upstreams by, so a host loads what the key covers. An
   upstream's `outputs` is looked up only for the variables the key counts. A
-  host-keyed cell's `HostKeyed.parts` holds the upstream components it reads (#10).
+  host-keyed cell's `HostKeyed.parts` holds the upstream components it reads.
+  `Resolver`, the type of a `resolve` entry, is exported (#10).
 - The Python analyzer and `normalize` remember the last 4096 sources they read, so
   a notebook analyzed again after an edit pays again only for the cells that changed.
   The analyzer hands each caller its own lists (#9).
