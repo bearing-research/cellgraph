@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- `@each <name> in <source> [key=<column>] [glob=<pattern>]`, a core annotation: a
+  cell that runs once per item the host lists, from an upstream variable or a name
+  the cell binds. `FanOut(over=)` and `graph.each_cells` carry it, and
+  `execution_key(instance=Item(key, digest))` keys one item in place of its source, so
+  changing one item leaves the others' keys alone. A reader of the cell sees one
+  ordinary output. A body reading the source itself is `each_reads_source`, and
+  `each_over_sweep`, `each_unknown_source` and `each_on_variant_member` are errors too
+  (#11).
+
 ## 0.2.0 - 2026-11-01
 
 - A blocked cell and the cells downstream of it are keyed: every cell has a

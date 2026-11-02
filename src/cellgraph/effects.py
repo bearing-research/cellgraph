@@ -88,9 +88,14 @@ class Member:
 
 @dataclass(frozen=True)
 class FanOut:
-    """Run once per member of ``group``, or of the single sweep group the cell reads."""
+    """Run once per member of ``group``, or of the single sweep group the cell reads.
+
+    With ``over``, once per item the host lists from that name instead: an upstream
+    variable, or a name the cell binds. The cell reads it through its items alone.
+    """
 
     group: str | None = None
+    over: str | None = None
 
 
 @dataclass(frozen=True)

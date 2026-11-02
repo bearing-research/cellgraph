@@ -40,6 +40,7 @@ from cellgraph.grammar import GRAMMAR, Directive, Grammar
 from cellgraph.keys import (
     PARTS_SCHEMA,
     HostKeyed,
+    Item,
     Keyed,
     OutputRef,
     Provenance,
@@ -105,6 +106,7 @@ __all__ = [
     "GroupConfig",
     "HostKeyed",
     "Input",
+    "Item",
     "Keeps",
     "Keyed",
     "LanguageAnalyzer",

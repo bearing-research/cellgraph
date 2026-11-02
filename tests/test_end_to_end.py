@@ -204,3 +204,165 @@ def test_the_binding_rule_is_what_the_keys_read(run):
     # A plain reader of a fan-out reads every instance, as a dict.
     read = analysis.variant_read("c4", "c3", "s")
     assert read.fanout and not read.scalar and set(read.variants) == {"small", "big"}
+
+
+# --- each ---------------------------------------------------------------------
+
+EACH = ("items = [1, 2]", "other = 1", "# @each item in items\nr = item + other", "t = r")
+
+
+def each_key(analysis, item, items="hc", other="ho", **kw):
+    return analysis.execution_key(
+        "c2",
+        instance=item,
+        published=published(c0=out(items=items), c1=out(other=other)),
+        env_hash=ENV,
+        **kw,
+    )
+
+
+def test_an_each_cell_is_wired_to_its_source_and_binds_its_item(run):
+    analysis = run(*EACH)
+    assert analysis.graph.each_cells == {"c2": "items"}
+    assert analysis.graph.fanout_cells == {}
+    assert ("c0", "c2", "items") in edges(analysis)
+    cell = analysis.cells["c2"]
+    assert "item" not in cell.references
+    assert cell.bound == ["item"]
+    assert cell.key_fields["each"] == {"name": "item", "source": "items"}
+    assert analysis.dag.each_cells == {"c2": "items"}
+    assert codes(analysis) == []
+
+
+def test_an_item_key_leaves_its_source_out(run):
+    analysis = run(*EACH)
+    item = cg.Item("a", "d1")
+    key = each_key(analysis, item)
+    assert key.parts["scope"] == "instance"
+    assert key.parts["instance"] == "a"
+    assert key.parts["upstream"] == [["each:items", "each:a=d1"], ["output:c1.other", "ho"]]
+    # The rest of the collection changing does not reach this item.
+    assert each_key(analysis, item, items="moved").digest == key.digest
+    # Its own content, its name and any other input do.
+    assert each_key(analysis, cg.Item("a", "d2")).digest != key.digest
+    assert each_key(analysis, cg.Item("b", "d1")).digest != key.digest
+    assert each_key(analysis, item, other="moved").digest != key.digest
+
+
+def test_the_legacy_item_key_is_a_subkey_of_its_base(run):
+    analysis = run(*EACH)
+    key = each_key(analysis, cg.Item("a", "d1"))
+    base = strata_provenance(["each:a=d1", "ho"], analysis.cells["c2"].definition_key, ENV)
+    assert key.digest == vestigo_subkey(base, "each=a")
+
+
+def test_the_cell_key_covers_the_whole_source(run):
+    analysis = run(*EACH)
+    key = each_key(analysis, None)
+    assert key.parts["scope"] == "cell"
+    assert ["output:c0.items", "hc"] in key.parts["upstream"]
+    assert each_key(analysis, None, items="moved").digest != key.digest
+
+
+def test_a_reader_of_an_each_cell_sees_one_ordinary_output(run):
+    analysis = run(*EACH)
+    key = analysis.execution_key("c3", published=published(c2=out(r="manifest")), env_hash=ENV)
+    assert key.parts["upstream"] == [["output:c2.r", "manifest"]]
+    assert analysis.variant_read("c3", "c2", "r") is None
+
+
+def test_a_bound_source_is_left_out_of_an_item_key_too():
+    host = cg.Vocabulary.core() | cg.Vocabulary(
+        [],
+        cell_effects=lambda meta, parsed: [cg.Binds("raw"), cg.Input("mount", "raw")],
+    )
+    analysis = cg.analyze([cg.Cell("c0", "# @each path in raw\nr = str(path)")], host)
+    assert analysis.cells["c0"].references == []
+    assert codes(analysis) == []
+    resolve = {"mount": lambda spec: cg.Resolved(spec.name, "fp", legacy="fp")}
+
+    whole = analysis.execution_key("c0", published=published(), resolve=resolve, env_hash=ENV)
+    assert whole.parts["inputs"] == [["mount", "raw", "fp"]]
+
+    moved = {"mount": lambda spec: cg.Resolved(spec.name, "moved", legacy="moved")}
+    item = cg.Item("a.csv", "d1")
+    key = analysis.execution_key(
+        "c0", instance=item, published=published(), resolve=resolve, env_hash=ENV
+    )
+    assert key.parts["inputs"] == []
+    assert key.parts["upstream"] == [["each:raw", "each:a.csv=d1"]]
+    assert (
+        analysis.execution_key(
+            "c0", instance=item, published=published(), resolve=moved, env_hash=ENV
+        ).digest
+        == key.digest
+    )
+
+
+def test_an_instance_of_an_each_cell_is_an_item(run):
+    analysis = run(*EACH, *MEMBERS, "# @per_variant\ns = m", groups=SWEEP)
+    with pytest.raises(ValueError, match="not an Item"):
+        each_key(analysis, "a")
+    with pytest.raises(ValueError, match="has no items"):
+        analysis.execution_key(
+            "c0", instance=cg.Item("a", "d"), published=published(), env_hash=ENV
+        )
+    with pytest.raises(ValueError, match="has no items"):
+        analysis.execution_key(
+            "c6", instance=cg.Item("a", "d"), published=published(), env_hash=ENV
+        )
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "# @each",
+        "# @each item",
+        "# @each item of items",
+        "# @each 1item in items",
+        "# @each item in 1items",
+        "# @each items in items",
+        "# @each item in items colour=red",
+        "# @each item in items key=",
+        "# @each item in items key=a key=b",
+    ],
+)
+def test_a_line_each_cannot_read_is_an_error(run, line):
+    assert codes(run("items = [1]", f"{line}\nr = 1")) == ["each_malformed"]
+
+
+def test_each_takes_its_options(run):
+    analysis = run("items = [1]", "# @each row in items key=id glob=*.csv\nr = row")
+    assert analysis.cells["c1"].annotations["each"] == {
+        "name": "row",
+        "source": "items",
+        "key": "id",
+        "glob": "*.csv",
+    }
+
+
+def test_a_body_reading_its_source_is_an_error(run):
+    analysis = run("items = [1]", "# @each item in items\nr = len(items)")
+    assert codes(analysis) == ["each_reads_source"]
+    assert not analysis.cells["c1"].plannable
+
+
+def test_each_over_a_source_nothing_makes_is_an_error(run):
+    assert codes(run("# @each item in items\nr = item")) == ["each_unknown_source"]
+
+
+def test_each_over_a_sweep_is_an_error(run):
+    analysis = run(*MEMBERS, "# @each item in m\nr = item", groups=SWEEP)
+    assert codes(analysis) == ["each_over_sweep"]
+
+
+def test_each_on_a_variant_member_is_an_error(run):
+    analysis = run("items = [1]", "# @variant g a\n# @each item in items\nr = item")
+    assert "each_on_variant_member" in codes(analysis)
+
+
+def test_each_with_per_variant_is_an_error(run):
+    analysis = run(
+        *MEMBERS, "items = [1]", "# @each item in items\n# @per_variant\nr = m", groups=SWEEP
+    )
+    assert codes(analysis) == ["fanout_conflict"]

@@ -105,6 +105,18 @@ class Published:
 
 
 @dataclass(frozen=True)
+class Item:
+    """One item of an ``@each`` cell: what the host calls it, and its current content.
+
+    The key is the instance's name, so it must be stable across runs; the digest is
+    what makes the instance run again.
+    """
+
+    key: str
+    digest: str
+
+
+@dataclass(frozen=True)
 class Resolved:
     """A resolver's answer for one input.
 
@@ -277,6 +289,7 @@ def _upstream(
     cell_id: str,
     instance: str | None,
     published: Callable[[str], Published],
+    without: str | None = None,
 ) -> _Assembly:
     graph = analysis.graph
     cell = analysis.cells[cell_id]
@@ -306,6 +319,8 @@ def _upstream(
         # An output is looked up only once it counts, so a host's mapping can be lazy.
         for var in names:
             if by_content and var not in reads:
+                continue
+            if var == without:
                 continue
             read = variant_read(analysis, cell_id, upstream_id, var, instance)
             if read is not None and read.fanout:
@@ -356,7 +371,7 @@ def execution_key(
     analysis: Analysis,
     cell_id: str,
     *,
-    instance: str | None = None,
+    instance: str | Item | None = None,
     published: Callable[[str], Published],
     resolve: Mapping[str, Resolver] | None = None,
     env_hash: str,
@@ -364,7 +379,9 @@ def execution_key(
     """The key that says whether *cell_id* (or one fan-out *instance*) must run.
 
     ``published(cell_id)`` is what an upstream published; ``resolve`` has one resolver
-    per input kind. ``instance=None`` on a fan-out cell is its cell-level key.
+    per input kind. ``instance=None`` on a fan-out cell is its cell-level key. An ``@each``
+    cell's instance is an :class:`Item`, keyed on that item in place of its source, so
+    changing one item leaves every other item's key alone.
     """
     from cellgraph.analysis import STRUCTURAL_CODES, NotPlannableError
 
@@ -381,18 +398,32 @@ def execution_key(
         raise NotPlannableError(cell_id, structural)
     owns_key = analysis.analyzers[cell.language].owns_key
     fanout = analysis.graph.fanout_cells.get(cell_id)
-    if instance is not None:
+    source = analysis.graph.each_cells.get(cell_id)
+    item = instance if isinstance(instance, Item) else None
+    if item is not None:
+        if source is None:
+            raise ValueError(f"cell {cell_id} has no items, so it has no item {item.key!r}")
+        instance = item.key
+    elif instance is not None:
+        if source is not None:
+            raise ValueError(f"cell {cell_id} runs per item; {instance!r} is not an Item")
         if fanout is None:
             raise ValueError(f"cell {cell_id} does not fan out, so it has no instance {instance!r}")
         if instance not in {name for name, _ in fanout.variants}:
             raise ValueError(f"cell {cell_id} has no instance {instance!r}")
 
     legacy = analysis.digest == "legacy-1"
-    assembly = _upstream(analysis, cell_id, instance, published)
+    if item is not None:
+        assembly = _upstream(analysis, cell_id, None, published, without=source)
+        assembly.add(f"each:{source}", f"each:{item.key}={item.digest}")
+    else:
+        assembly = _upstream(analysis, cell_id, instance, published)
     inputs: list[tuple[str, str, str]] = []
     resolvers = resolve or {}
-    # A host-keyed cell's inputs are the host's to key.
+    # A host-keyed cell's inputs are the host's to key. An item stands in for its source.
     for spec in cell.inputs if owns_key else []:
+        if item is not None and spec.name == source:
+            continue
         if spec.kind not in resolvers:
             raise ValueError(f"no resolver for {spec.kind!r} inputs (cell {cell_id})")
         result = resolvers[spec.kind](spec)
@@ -434,7 +465,9 @@ def execution_key(
     components = [value for _, value in assembly.components] + [c for _, _, c in inputs]
     if legacy:
         digest = compute_provenance_hash(components, cell.definition_key, env_hash)
-        if instance is not None:
+        if item is not None:
+            digest = derive_subkey(digest, f"each={item.key}")
+        elif instance is not None:
             digest = derive_subkey(digest, f"variant={instance}")
     else:
         digest = _sha256(
