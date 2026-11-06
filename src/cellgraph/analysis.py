@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import ast
 import difflib
-import math
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -36,6 +35,7 @@ from cellgraph.effects import (
     Seeds,
 )
 from cellgraph.grammar import Directive
+from cellgraph.keys import is_canonical
 from cellgraph.languages import (
     Analyzed,
     LanguageAnalyzer,
@@ -43,11 +43,6 @@ from cellgraph.languages import (
     registered_analyzers,
 )
 from cellgraph.vocabulary import AnnotationError, Partial, ValidationContext, Vocabulary
-
-NORMALIZE_LEGACY_1 = "legacy-1"
-NORMALIZE_CELLGRAPH_1 = "cellgraph-1"
-DIGEST_LEGACY_1 = "legacy-1"
-DIGEST_CELLGRAPH_1 = "cellgraph-1"
 
 # Diagnostics that make a structural error: the cell is on a cycle or in a collision.
 STRUCTURAL_CODES = frozenset({"cycle", "variant_collision"})
@@ -293,6 +288,9 @@ class CellAnalysis:
     inputs: list[Input] = field(default_factory=list)
     nocache: bool = False
     key_fields: dict[str, Any] = field(default_factory=dict)
+    # In-key annotations present but missing from ``key_fields`` (unreadable or
+    # unencodable): the key cannot tell this cell from one without them.
+    unkeyed: list[str] = field(default_factory=list)
     diagnostics: list[Diagnostic] = field(default_factory=list)
     plannable: bool = True
     # The cells whose own errors keep this one from planning (itself included).
@@ -331,19 +329,6 @@ class CellAnalysis:
     @property
     def has_error(self) -> bool:
         return any(d.severity == Severity.ERROR for d in self.diagnostics)
-
-
-def _is_canonical(value: Any) -> bool:
-    """None, bool, int, finite float, str, and lists and str-keyed dicts of these."""
-    if value is None or isinstance(value, bool | int | str):
-        return True
-    if isinstance(value, float):
-        return math.isfinite(value)
-    if isinstance(value, list):
-        return all(_is_canonical(item) for item in value)
-    if isinstance(value, dict):
-        return all(isinstance(k, str) and _is_canonical(v) for k, v in value.items())
-    return False
 
 
 def _annotation_errors(exc: AnnotationError | ExceptionGroup) -> list[AnnotationError]:
@@ -434,6 +419,8 @@ def _parse_phase(
                     annotation=annotation.key,
                     line=exc.line if exc.line is not None else directives[0].line,
                 )
+            if annotation.in_key:
+                ca.unkeyed.append(annotation.key)
             continue
         if isinstance(value, Partial):
             for exc in value.errors:
@@ -447,7 +434,7 @@ def _parse_phase(
         ca.annotations[annotation.key] = value
         if annotation.in_key:
             encoded = annotation.encode(value) if annotation.encode is not None else value
-            if not _is_canonical(encoded):
+            if not is_canonical(encoded):
                 ca.error(
                     f"{annotation.key}_unencodable",
                     f"`@{annotation.key}` has a value the key cannot encode "
@@ -456,6 +443,7 @@ def _parse_phase(
                     line=directives[0].line,
                     args={"type": type(encoded).__name__},
                 )
+                ca.unkeyed.append(annotation.key)
             else:
                 ca.key_fields[annotation.key] = encoded
         if annotation.effects is not None:
@@ -516,8 +504,9 @@ def _names_phase(ca: CellAnalysis, analyzed: Analyzed) -> None:
 
     for effect in ca.effects:
         if isinstance(effect, FanOut) and effect.over is not None:
-            # An instance's key leaves the source out, so the body must not read it whole.
-            if effect.over in analyzed.references:
+            # An instance's key leaves the source out, so the cell must not read it whole:
+            # not in its body (a builtin's name included), nor through a Reads effect.
+            if effect.over in {*analyzed.references, *analyzed.builtin_references, *read}:
                 ca.error(
                     "each_reads_source",
                     f"the cell reads `{effect.over}` itself, which every item's result would "
@@ -1026,8 +1015,6 @@ class Analysis:
     vocabulary: Vocabulary
     analyzers: dict[str, LanguageAnalyzer]
     groups: GroupConfig
-    normalization: str
-    digest: str
 
     @property
     def diagnostics(self) -> list[Diagnostic]:
@@ -1077,10 +1064,8 @@ def analyze(
     cells: Iterable[Cell],
     vocabulary: Vocabulary,
     groups: GroupConfig | None = None,
-    normalization: str = NORMALIZE_LEGACY_1,
-    digest: str = DIGEST_LEGACY_1,
-    strict: bool = False,
     *,
+    strict: bool = False,
     analyzers: Mapping[str, LanguageAnalyzer] | None = None,
     context: Any = None,
 ) -> Analysis:
@@ -1092,10 +1077,6 @@ def analyze(
     """
     from cellgraph.keys import definition_key
 
-    if normalization not in (NORMALIZE_LEGACY_1, NORMALIZE_CELLGRAPH_1):
-        raise ValueError(f"unknown normalization {normalization!r}")
-    if digest not in (DIGEST_LEGACY_1, DIGEST_CELLGRAPH_1):
-        raise ValueError(f"unknown digest {digest!r}")
     table = dict(analyzers) if analyzers is not None else registered_analyzers()
     groups = groups or GroupConfig()
     cell_list = list(cells)
@@ -1161,8 +1142,6 @@ def analyze(
         vocabulary=vocabulary,
         analyzers=table,
         groups=groups,
-        normalization=normalization,
-        digest=digest,
     )
     for ca in analyses:
         ca.normalized, ca.definition_key = definition_key(analysis, ca)

@@ -141,8 +141,8 @@ An analyzer may also set `directives`:
 - A frozenset of keys: only those, e.g. `frozenset({"app"})`.
 
 A `# @` line whose key the language does not read is plain text: no annotation and
-no diagnostic, not even `annotation_unknown`, and the `cellgraph-1` normalization
-keeps it in the body. `directive_keys(analyzer)` gives the set, or None for every
+no diagnostic, not even `annotation_unknown`, and the definition key keeps it in
+the body. `directive_keys(analyzer)` gives the set, or None for every
 key; any other value of `directives` is a `TypeError`.
 
 An analyzer may also set `comment`, the line comment marker of its directive
@@ -175,8 +175,7 @@ still gets names, edges, plannability and plan steps, and `execution_key` return
 ## Analysis
 
 ```python
-analyze(cells, vocabulary, groups=None, normalization="legacy-1",
-        digest="legacy-1", strict=False, *, analyzers=None, context=None)
+analyze(cells, vocabulary, groups=None, *, strict=False, analyzers=None, context=None)
 ```
 
 `groups` is `GroupConfig(modes={group: "switch" | "sweep"}, active={group: name})`.
@@ -250,17 +249,15 @@ wired, planned and keyed.
 ### Definition key
 
 ```
-normalized = legacy-1:     the Python AST round trip of the whole source
-                           (line strip when it does not parse), any language
-             cellgraph-1:  the language's normalize() of the source without
-                           its directive lines
-key        = legacy-1:     sha256(normalized [+ "\0" + json(fields, sorted, compact)])
-             cellgraph-1:  sha256(canonical_json(["cellgraph-1", "definition",
-                                                  normalized, fields]))
+normalized = the language's normalize() of the source without its directive lines
+key        = sha256(canonical_json(["definition", 1, language, normalized, fields]))
 ```
 
-`fields` is the cell's `key_fields`, and is left out of the legacy text when empty.
-`normalization` and `digest` are chosen independently.
+`fields` is the cell's `key_fields`; `1` is the definition key's own format, apart
+from `PARTS_SCHEMA`. An in-key annotation that is present but could not be read or
+encoded is listed in the cell's `unkeyed`, and its execution key is `Unavailable`. Comments other than directives stay in the
+body for the normalizer to judge; Python's drops them in its AST round trip. The
+language is in the key: the same text in two languages is two programs.
 
 ### Execution key
 
@@ -280,28 +277,28 @@ analysis.execution_key(cell_id, *, instance=None, published, resolve=None, env_h
 - A `NoCache` upstream is keyed by its bytes, as
   `derive_subkey(hash, "content=<digest>")`, and only for the variables the reader
   reads.
-- `resolve[kind](input) -> Resolved(identity, fingerprint, legacy=None)` or
-  `Unavailable`; `Resolver` is that callable's type. Under the `legacy-1` digest, `legacy` is the component itself and
-  is required.
+- `resolve[kind](input) -> Resolved(identity, fingerprint)` or `Unavailable`;
+  `Resolver` is that callable's type. Both values must be canonical JSON, and the
+  component is `canonical_json([kind, name, identity, fingerprint])`.
 - `instance` is an `Item(key, digest)` on an `@each` cell: the key is built with this
   item in place of its source, under `each:<source>` in `upstream`, so changing one
   item leaves the others' keys alone. Which items there are, and what a digest covers,
   are the host's. `instance=None` is the cell-level key, over the whole source; a cell
   reading the output sees one ordinary output.
 - `instance` names one variant of a fan-out cell. It reads its own group's
-  variable as a scalar of that variant, and its key is
-  `derive_subkey(cell key, "variant=<name>")` under `legacy-1`.
+  variable as a scalar of that variant. Either kind of instance is `scope` and
+  `instance` in `parts`, so it is in the key.
 
 Results:
 
 - `Keyed(digest, parts)`.
-- `Unavailable(reason, parts, unresolved)`: under `cellgraph-1`, an unreadable
-  output, a content-keyed output without a digest, or an unresolved input. Under
-  `legacy-1`, an unreadable output is skipped, and a missing digest falls back to
-  the provenance hash, as Strata does; an unresolved input is unavailable under
-  both.
-- `HostKeyed(parts)`: for a language with `owns_key=False`. `parts` holds the
-  upstream components it reads, for the host's own key, and no inputs.
+- `Unavailable(reason, parts, unresolved)`: an unreadable output, a no-cache
+  output without a content digest (its key follows its bytes), an unresolved
+  input, or an in-key annotation missing from the fields (`field:<key>`).
+- `HostKeyed(parts, unresolved)`: for a language with `owns_key=False`. `parts`
+  holds the upstream components it reads and no inputs; the host adds its own and
+  keys them with `parts_digest`. `unresolved` names the upstreams that could not
+  be read, as `Unavailable` would.
 
 A blocked cell is keyed too, as are the cells downstream of it: a result cached
 under its key is still its result, and whether it may run is `plannable`. A cell a
@@ -311,25 +308,29 @@ cycle or variant collision reaches (on it or upstream) raises
 `outputs` is read lazily: a variable's ref is looked up only when the key counts
 it, so a host can pass a mapping that reads its store on demand.
 
-`parts` is versioned by `parts_schema` (`PARTS_SCHEMA`, now 1) and holds:
+`parts` is versioned by `parts_schema` (`PARTS_SCHEMA`, now 2) and holds:
 
-- `digest`, `scope` (`cell` or `instance`), `instance`, `definition_key`, `fields`,
+- `scope` (`cell` or `instance`), `instance`, `definition_key`, `fields`,
   `env_hash`;
 - `upstream`: `[address, component]` pairs, with addresses `output:`, `cell:`,
   `wired:`, `variant:`, `sweep:`, `instances:` and `each:`;
 - `inputs`: `[kind, name, component]`.
 
 ```
-legacy-1:     compute_provenance_hash(components, definition_key, env_hash)
-              = sha256 over sorted components, each followed by "\0", then the
-                definition key, "\0", the env hash
-cellgraph-1:  sha256(canonical_json(["cellgraph-1", "execution", definition_key,
-                                     env_hash, sorted(components), scope, instance]))
+key = parts_digest(parts) = sha256(canonical_json(parts))
 ```
+
+What `parts` shows is exactly what the key covers: each component sits next to
+its address, so swapping two variables' contents changes the key.
 
 `derive_subkey(parent, *labels)` is `sha256("parent:label1:...")`, byte-identical
 to vestigo's; a label containing `:` is refused. `canonical_json` sorts keys, has
-no whitespace, keeps UTF-8 as is, and refuses NaN.
+no whitespace and keeps UTF-8 as is. It takes only what `is_canonical` accepts
+(None, bool, int, finite float, str, and lists and str-keyed dicts of these),
+which is also the rule for a key field: `json` would turn `{1: "a"}` into
+`{"1": "a"}` and a tuple into a list, so two values would share a key. Anything
+else is a `TypeError`. Fan-out and sweep components are JSON lists of
+`[name, component]` pairs, so no host string can forge another instance.
 
 ## Planning
 

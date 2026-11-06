@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+- One key scheme. `analyze` loses `normalization=` and `digest=`, and the
+  `legacy-1` format (Strata's `compute_source_hash` and `compute_provenance_hash`)
+  is gone with `compute_provenance_hash`, `Resolved.legacy` and the four
+  `NORMALIZE_*` and `DIGEST_*` names. Every key changes once (#14):
+  - The definition key is the language, the body without its directive lines as
+    the language normalizes it, and the key fields.
+  - The execution key is `parts_digest(parts)`, the hash of `parts` itself, so a
+    component counts with its address: swapping two variables' contents changes
+    the key. A host keying a `HostKeyed` cell uses `parts_digest` too.
+  - An unreadable output, a no-cache output without a content digest, and an
+    in-key annotation that could not be read or encoded (`CellAnalysis.unkeyed`)
+    are `Unavailable`, where a key was built without them. `HostKeyed.unresolved` names the upstreams a host-keyed cell could not
+    read.
+  - An instance is `scope` and `instance` in `parts`, so an `@each` item key may
+    contain `:` (a path or a URI), which `derive_subkey` refused.
+  - `canonical_json` takes only what the new `is_canonical` accepts, the same rule
+    as a key field, so `{1: "a"}` and `{"1": "a"}`, or a tuple and a list, no longer
+    share a key. Fan-out and sweep components are JSON lists, not `;`-joined
+    strings a run id could forge.
+  - `PARTS_SCHEMA` is 2, and the definition key has its own format tag.
+  - `strict` is keyword-only, so an old positional call fails loudly.
+- `each_reads_source` also covers a source read through a `Reads` effect or named
+  like a builtin, which an item key would have left out (#14).
+
 - A language's directives use its own comment marker: an analyzer sets `comment`
   (`"#"` by default), so a SQL cell reads `-- @key value`. The marker replaces `#`
   for that language, where a `#` line is body. `comment_marker(analyzer)` reads it,

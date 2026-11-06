@@ -134,13 +134,6 @@ def test_args_do_not_change_what_a_diagnostic_equals():
     assert {a} == {cg.Diagnostic("x", cg.Severity.WARN, "m", args={"k": 2})}
 
 
-def test_unknown_normalization_or_digest_is_refused(run):
-    with pytest.raises(ValueError):
-        run("x = 1", normalization="nope")
-    with pytest.raises(ValueError):
-        run("x = 1", digest="nope")
-
-
 class Prose:
     owns_key = True
     directives = False
@@ -158,7 +151,6 @@ def test_a_language_without_directives_reads_no_annotations(vocab):
         [cg.Cell("a", source, language="prose")],
         vocab,
         analyzers={"prose": Prose()},
-        normalization=cg.NORMALIZE_CELLGRAPH_1,
     )
     cell = analysis.cells["a"]
     assert (cell.directives, cell.annotations, cell.diagnostics) == ([], {}, [])
@@ -246,7 +238,6 @@ def test_a_language_with_a_key_set_reads_only_those_keys(vocab):
         [cg.Cell("c0", "x = 1"), cg.Cell("c1", source, language="notes")],
         vocab,
         analyzers={"python": cg.PythonAnalyzer(), "notes": Notes()},
-        normalization=cg.NORMALIZE_CELLGRAPH_1,
     )
     cell = analysis.cells["c1"]
     assert cell.annotations == {"app": "hide"}
@@ -289,7 +280,6 @@ def test_a_dash_language_with_a_key_set_reads_only_those_keys(vocab):
         [cg.Cell("c0", "x = 1"), cg.Cell("c1", source, language="notes")],
         vocab,
         analyzers={"python": cg.PythonAnalyzer(), "notes": DashNotes()},
-        normalization=cg.NORMALIZE_CELLGRAPH_1,
     )
     cell = analysis.cells["c1"]
     assert cell.annotations == {"app": "hide"}
