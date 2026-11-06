@@ -13,10 +13,25 @@ Cell(id, source, language="python", meta={})
 
 `meta` is the host's, passed untouched to the vocabulary's `cell_effects` hook.
 
-A cell's directives are its leading block of `#` comment lines that read
+A cell's directives are its leading block of comment lines that read
 `# @key value`. Blank lines and other comments may sit in the block, and the block
 ends at the first line of body. Keys are lower-cased and values stripped.
-`GRAMMAR` (a `Grammar`) parses and edits that block:
+
+The comment marker is the cell language's: `#` by default, and whatever its
+analyzer declares as `comment` otherwise (see Languages). The marker replaces `#`
+for that language. A SQL cell whose analyzer sets `comment = "--"` reads:
+
+```sql
+-- @name Top orders
+-- @sql connection=warehouse
+SELECT * FROM orders WHERE amount > :min_amount
+```
+
+There a `#` line is body: it ends the block, and `# @key` is not a directive.
+
+`GRAMMAR` (a `Grammar`, the `#` one) parses and edits that block.
+`Grammar(marker="#")` is the grammar for another marker, and
+`grammar.with_marker(marker)` is a copy of a grammar for one, of the same class:
 
 | Method | Does |
 | ------ | ---- |
@@ -26,6 +41,18 @@ ends at the first line of body. Keys are lower-cased and values stripped.
 | `strip_directives(source, keys=None)` | the source without its directive lines (only `keys`' when given); other comments stay |
 | `set_directive(source, key, value)` | replace the first `# @key`, drop repeats, or insert one after the last directive; line endings are kept |
 | `remove_directive(source, key)` | every `# @key` in the block removed |
+
+A vocabulary edits a cell through the grammar of its language:
+
+| Method | Does |
+| ------ | ---- |
+| `vocab.grammar_for(analyzer)` | `vocab.grammar.with_marker(comment_marker(analyzer))`; what `analyze` and the definition key use |
+| `vocab.set_directive(source, key, value, *, language="python")` | `set_directive` in `language`'s marker; refuses a stacked annotation's key |
+| `vocab.remove_directive(source, key, *, language="python")` | `remove_directive` in `language`'s marker |
+
+`language` is a registered language's name, or the analyzer itself. A host that
+passes its own `analyzers=` table to `analyze` passes the same analyzer here, so
+the edit and the parse use one marker.
 
 ## Effects
 
@@ -82,7 +109,8 @@ Vocabulary(annotations, cell_effects=None, grammar=GRAMMAR)
 
 - A directive key claimed twice is refused, and so is a key in both sides of
   `a | b`, so composition order never decides a result. `|` chains the two
-  `cell_effects` hooks.
+  `cell_effects` hooks, and keeps a custom `grammar` from either side; two
+  different custom grammars are refused.
 - `cell_effects(meta, parsed)` is called for every cell with the host's `meta` and
   the parsed value of each present annotation. It is for effects that come from
   host configuration, such as mounts declared outside the source.
@@ -91,8 +119,9 @@ Vocabulary(annotations, cell_effects=None, grammar=GRAMMAR)
   `each <name> in <source> [key=<column>] [glob=<pattern>]` (in the key).
 - `vocab[key]`, `key in vocab`, `vocab.keys` (also-read keys included),
   `vocab.owner(directive_key)`, `vocab.without(*keys)`, `vocab.replace(key, **changes)`.
-- `vocab.set_directive(source, key, value)` refuses a stacked annotation's key,
-  which a single-line edit would truncate.
+- `vocab.set_directive(source, key, value, *, language="python")` refuses a
+  stacked annotation's key, which a single-line edit would truncate. `language`
+  picks the comment marker (see Cells and the grammar).
 
 ## Languages
 
@@ -115,6 +144,14 @@ A `# @` line whose key the language does not read is plain text: no annotation a
 no diagnostic, not even `annotation_unknown`, and the `cellgraph-1` normalization
 keeps it in the body. `directive_keys(analyzer)` gives the set, or None for every
 key; any other value of `directives` is a `TypeError`.
+
+An analyzer may also set `comment`, the line comment marker of its directive
+block: `"#"`, the default, or e.g. `"--"` for SQL. It replaces `#` for the
+language, so its `# @` lines are body. `comment` and `directives` are independent:
+a `--` language with `directives = frozenset({"app"})` reads `-- @app` only, and
+its other `-- @` lines are plain text, kept in the body as above.
+`comment_marker(analyzer)` gives the marker; one that is not a non-empty str
+without `@` or whitespace is a `TypeError`.
 
 `Analyzed(defines, references, builtin_references, mutation_defines, error,
 diagnostics)`.

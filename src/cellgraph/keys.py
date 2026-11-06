@@ -173,9 +173,8 @@ def definition_key(analysis: Analysis, cell: CellAnalysis) -> tuple[str, str]:
         normalized = python.normalize(cell.source)
     else:
         analyzer = analysis.analyzers[cell.language]
-        body = analysis.vocabulary.grammar.strip_directives(
-            cell.source, keys=directive_keys(analyzer)
-        )
+        grammar = analysis.vocabulary.grammar_for(analyzer)
+        body = grammar.strip_directives(cell.source, keys=directive_keys(analyzer))
         normalized = analyzer.normalize(body)
     fields = cell.key_fields
     if analysis.digest == "legacy-1":

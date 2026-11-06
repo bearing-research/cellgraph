@@ -1,9 +1,10 @@
 """cellgraph: the cell graph of a notebook or script, with a host-supplied vocabulary.
 
-A cell is source with a leading ``# @key value`` block. ``analyze`` reads each
-cell's names and annotations, applies the annotations' effects, wires the DAG,
-and keys every cell; ``Analysis.execution_key`` and ``Analysis.plan`` answer the
-two questions a host asks before running one.
+A cell is source with a leading ``# @key value`` block, or ``-- @key value`` in a
+language whose comment marker is ``--``. ``analyze`` reads each cell's names and
+annotations, applies the annotations' effects, wires the DAG, and keys every cell;
+``Analysis.execution_key`` and ``Analysis.plan`` answer the two questions a host
+asks before running one.
 """
 
 from cellgraph.analysis import (
@@ -58,6 +59,7 @@ from cellgraph.languages import (
     Analyzed,
     LanguageAnalyzer,
     UnknownLanguageError,
+    comment_marker,
     directive_keys,
     get_language_analyzer,
     register_language_analyzer,
@@ -134,6 +136,7 @@ __all__ = [
     "Vocabulary",
     "analyze",
     "canonical_json",
+    "comment_marker",
     "compute_provenance_hash",
     "derive_subkey",
     "directive_keys",

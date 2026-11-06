@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 from cellgraph.diagnostics import Diagnostic
 from cellgraph.effects import Effect
 from cellgraph.grammar import GRAMMAR, Directive, Grammar
+from cellgraph.languages import LanguageAnalyzer, comment_marker, get_language_analyzer
 
 if TYPE_CHECKING:
     from cellgraph.analysis import Cell
@@ -195,7 +196,14 @@ class Vocabulary:
         return cls(core_annotations())
 
     def __or__(self, other: Vocabulary) -> Vocabulary:
-        """Both vocabularies; a key in both is refused, so order never decides a result."""
+        """Both vocabularies; a key in both is refused, so order never decides a result.
+
+        A custom grammar on one side is kept; one on each side is refused unless it
+        is the same grammar.
+        """
+        custom = [g for g in (self.grammar, other.grammar) if g is not GRAMMAR]
+        if len(custom) == 2 and custom[0] is not custom[1]:
+            raise ValueError("both vocabularies have their own grammar")
         hooks = [hook for hook in (self.cell_effects, other.cell_effects) if hook is not None]
         combined: CellEffects | None
         if len(hooks) == 2:
@@ -206,7 +214,11 @@ class Vocabulary:
 
         else:
             combined = hooks[0] if hooks else None
-        return Vocabulary([*self.annotations, *other.annotations], cell_effects=combined)
+        return Vocabulary(
+            [*self.annotations, *other.annotations],
+            cell_effects=combined,
+            grammar=custom[0] if custom else GRAMMAR,
+        )
 
     def __iter__(self) -> Iterator[Annotation]:
         return iter(self.annotations)
@@ -251,13 +263,30 @@ class Vocabulary:
             grammar=self.grammar,
         )
 
-    def set_directive(self, source: str, key: str, value: str) -> str:
-        """*source* with one ``# @key value`` set; refused for a stacked annotation's key."""
+    def grammar_for(self, analyzer: LanguageAnalyzer) -> Grammar:
+        """The grammar of a cell in *analyzer*'s language: this one, with its marker."""
+        return self.grammar.with_marker(comment_marker(analyzer))
+
+    def set_directive(
+        self, source: str, key: str, value: str, *, language: str | LanguageAnalyzer = "python"
+    ) -> str:
+        """*source* with one ``@key value`` set in *language*'s comment marker.
+
+        *language* is a registered language's name, or the analyzer itself for a host
+        that passes its own ``analyzers=`` table. Refused for a stacked annotation's
+        key, which a single-line edit would truncate.
+        """
         owner = self.owner(key.lower())
         if owner is not None and is_stacked(owner.parse):
             raise ValueError(f"@{key} is repeatable; edit the cell source directly")
-        return self.grammar.set_directive(source, key, value)
+        return self._edit_grammar(language).set_directive(source, key, value)
 
-    def remove_directive(self, source: str, key: str) -> str:
-        """*source* with every ``# @key`` directive removed from its leading block."""
-        return self.grammar.remove_directive(source, key)
+    def remove_directive(
+        self, source: str, key: str, *, language: str | LanguageAnalyzer = "python"
+    ) -> str:
+        """*source* with every ``@key`` directive removed from its leading block."""
+        return self._edit_grammar(language).remove_directive(source, key)
+
+    def _edit_grammar(self, language: str | LanguageAnalyzer) -> Grammar:
+        analyzer = get_language_analyzer(language) if isinstance(language, str) else language
+        return self.grammar_for(analyzer)
