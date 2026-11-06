@@ -2,12 +2,14 @@
 
 One object holds the whole syntax: finding the leading block, reading a directive,
 stripping the block, and setting or removing a directive, so editing round-trips
-with parsing. A second syntax (Quarto's ``#| key: value``) would be another
-``Grammar``.
+with parsing. The comment marker is the cell language's: ``#`` by default, ``--``
+for SQL (``-- @key value``). A second syntax (Quarto's ``#| key: value``) would be
+another ``Grammar``.
 """
 
 from __future__ import annotations
 
+import copy
 import re
 from collections.abc import Container, Iterator
 from dataclasses import dataclass
@@ -15,34 +17,74 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class Directive:
-    """One ``# @key value`` line: its lower-cased key, its value, and its 1-based line."""
+    """One ``<marker> @key value`` line: its lower-cased key, its value, and its 1-based line."""
 
     key: str
     value: str
     line: int
 
 
-class Grammar:
-    """The ``# @key value`` syntax of a cell's leading comment block."""
+def check_marker(marker: object) -> str:
+    """*marker* if it can start a comment line; a ``TypeError`` otherwise."""
+    if (
+        not isinstance(marker, str)
+        or not marker
+        or "@" in marker
+        or any(c.isspace() for c in marker)
+    ):
+        raise TypeError(
+            f"a comment marker must be a non-empty str without `@` or whitespace, not {marker!r}"
+        )
+    return marker
 
-    directive_re = re.compile(r"^#\s*@(\w+)\s*(.*?)\s*$")
+
+class Grammar:
+    """The ``<marker> @key value`` syntax of a cell's leading comment block.
+
+    *marker* starts every line of the block (``#`` by default). It replaces ``#``:
+    under ``--``, a ``#`` line is body and ends the block.
+    """
+
+    # Class-level defaults, so a subclass's own ``directive_re`` and a subclass
+    # ``__init__`` that skips ours both keep working as they did in 0.3.0.
+    marker: str = "#"
+    directive_re: re.Pattern[str] = re.compile(r"^#\s*@(\w+)\s*(.*?)\s*$")
+
+    def __init__(self, marker: str = "#") -> None:
+        if check_marker(marker) != self.marker:
+            self._set_marker(marker)
+
+    def with_marker(self, marker: str) -> Grammar:
+        """This grammar for *marker*: itself when it already uses it, else a copy.
+
+        A subclass whose directive pattern is not built from the marker overrides this.
+        """
+        if marker == self.marker:
+            return self
+        other = copy.copy(self)
+        other._set_marker(marker)
+        return other
+
+    def _set_marker(self, marker: str) -> None:
+        self.marker = check_marker(marker)
+        self.directive_re = re.compile(rf"^{re.escape(marker)}\s*@(\w+)\s*(.*?)\s*$")
 
     def block(self, source: str) -> Iterator[tuple[int, str]]:
         """Yield ``(1-based lineno, raw_line)`` for the leading comment block.
 
-        The block is the first contiguous run of blank and ``#`` lines; blank lines
-        are not yielded.
+        The block is the first contiguous run of blank lines and lines that start
+        with the marker; blank lines are not yielded.
         """
         for lineno, line in enumerate(source.splitlines(), start=1):
             stripped = line.strip()
             if not stripped:
                 continue
-            if not stripped.startswith("#"):
+            if not stripped.startswith(self.marker):
                 break
             yield lineno, line
 
     def parse_directive(self, line: str) -> tuple[str, str] | None:
-        """Match one ``# @key value`` line and return ``(key.lower(), value)``, or ``None``."""
+        """Match one ``<marker> @key value`` line: ``(key.lower(), value)``, or ``None``."""
         match = self.directive_re.match(line.strip())
         if not match:
             return None
@@ -62,7 +104,7 @@ class Grammar:
         lines = source.splitlines()
         for i, line in enumerate(lines):
             stripped = line.strip()
-            if not stripped or stripped.startswith("#"):
+            if not stripped or stripped.startswith(self.marker):
                 continue
             return "\n".join(lines[i:])
         return ""
@@ -84,9 +126,9 @@ class Grammar:
         return "\n".join(kept)
 
     def set_directive(self, source: str, key: str, value: str) -> str:
-        """Return *source* with a single ``# @key value`` directive set.
+        """Return *source* with a single ``<marker> @key value`` directive set.
 
-        Replaces the first ``# @key`` in the leading block and drops duplicates; when
+        Replaces the first ``<marker> @key`` in the leading block and drops duplicates; when
         absent, inserts after the last directive (or at the top).
         """
         key = key.lower()
@@ -108,7 +150,7 @@ class Grammar:
         return result + sep if source.endswith("\n") else result
 
     def remove_directive(self, source: str, key: str) -> str:
-        """Return *source* with every ``# @key`` directive removed from the block."""
+        """Return *source* with every ``<marker> @key`` directive removed from the block."""
         key = key.lower()
         sep = self._line_sep(source)
         lines = source.splitlines()
@@ -121,19 +163,17 @@ class Grammar:
         result = sep.join(kept)
         return result + sep if source.endswith("\n") else result
 
-    @staticmethod
-    def _block_end(lines: list[str]) -> int:
+    def _block_end(self, lines: list[str]) -> int:
         """Index of the first body line: the end of the leading comment block."""
         for i, line in enumerate(lines):
             stripped = line.strip()
-            if stripped and not stripped.startswith("#"):
+            if stripped and not stripped.startswith(self.marker):
                 return i
         return len(lines)
 
-    @staticmethod
-    def _format(key: str, value: str) -> str:
+    def _format(self, key: str, value: str) -> str:
         value = value.strip()
-        return f"# @{key} {value}" if value else f"# @{key}"
+        return f"{self.marker} @{key} {value}" if value else f"{self.marker} @{key}"
 
     @staticmethod
     def _line_sep(source: str) -> str:

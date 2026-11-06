@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- A language's directives use its own comment marker: an analyzer sets `comment`
+  (`"#"` by default), so a SQL cell reads `-- @key value`. The marker replaces `#`
+  for that language, where a `#` line is body. `comment_marker(analyzer)` reads it,
+  `Grammar(marker=)` and `Grammar.with_marker` build the grammar for one, and
+  `Vocabulary.grammar_for(analyzer)` is the grammar `analyze` and the definition key
+  use. `Vocabulary.set_directive` and `remove_directive` take `language=`, a
+  registered name or the analyzer itself. A `#` language is unchanged.
+  `Vocabulary.__or__` keeps a custom `grammar`, which it dropped, and refuses two
+  different ones (#13).
+
 ## 0.3.0 - 2026-11-02
 
 - `@each <name> in <source> [key=<column>] [glob=<pattern>]`, a core annotation: a

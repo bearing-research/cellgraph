@@ -1,7 +1,8 @@
 # cellgraph
 
 The cell graph of a notebook or script. A cell is source with a leading
-`# @key value` block; the set of annotations is the host's, composed from the
+`# @key value` block (`-- @key value` in a language whose comment marker is
+`--`); the set of annotations is the host's, composed from the
 ten effects the package implements (binds, defines, reads, keeps, after, seeds,
 member, fan-out, input, no-cache). `analyze` reads every cell's names and
 annotations, applies their effects, wires the DAG, says which cells can be

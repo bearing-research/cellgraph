@@ -14,6 +14,16 @@ class Words:
         return cg.strip_lines(body)
 
 
+class Dashes(Words):
+    """Words whose directives are ``-- @key value``, as a SQL host would declare."""
+
+    comment = "--"
+
+    def analyze(self, cell):
+        body = cg.Grammar("--").strip(cell.source).split()
+        return cg.Analyzed(defines=body[:1], references=body[1:])
+
+
 def test_strip_lines():
     assert cg.strip_lines("\n  a  \n\tb \n\n") == "a\n\tb"
 
@@ -41,3 +51,18 @@ def test_explicit_analyzers_replace_the_registry():
         analyzers={"words": Words()},
     )
     assert analysis.cells["a"].references == ["x"]
+
+
+def test_the_comment_marker_defaults_to_hash():
+    assert cg.comment_marker(Words()) == "#"
+    assert cg.comment_marker(cg.PythonAnalyzer()) == "#"
+    assert cg.comment_marker(Dashes()) == "--"
+
+
+@pytest.mark.parametrize("marker", ["", "-- ", 3, "@"])
+def test_a_bad_comment_marker_is_a_type_error(marker):
+    class Bad(Words):
+        comment = marker
+
+    with pytest.raises(TypeError, match="comment marker"):
+        cg.comment_marker(Bad())

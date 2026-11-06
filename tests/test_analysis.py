@@ -1,5 +1,6 @@
 import pytest
 from conftest import codes, edges
+from test_languages import Dashes
 
 import cellgraph as cg
 
@@ -255,6 +256,45 @@ def test_a_language_with_a_key_set_reads_only_those_keys(vocab):
     assert cell.plannable
     # Only the read key leaves the normalized text.
     assert cell.normalized == "# @after c0\n# @nocache maybe\n# @worker\nSome notes."
+
+
+def test_a_dash_language_reads_dash_directives(vocab):
+    cells = [
+        cg.Cell("c0", "x = 1"),
+        cg.Cell("c1", "# @after c0\nz = 2"),
+        cg.Cell("c2", "-- @after c1\n-- note\n-- @nocache\na", language="dashes"),
+        cg.Cell("c3", "# @after c0\n# @nocach\nb", language="dashes"),
+    ]
+    analysis = cg.analyze(
+        cells, vocab, analyzers={"python": cg.PythonAnalyzer(), "dashes": Dashes()}
+    )
+    # A Python cell in the same notebook still reads ``#``.
+    assert analysis.cells["c1"].after == ["c0"]
+    sql = analysis.cells["c2"]
+    assert (sql.after, sql.nocache, sql.diagnostics) == (["c1"], True, [])
+    # Under ``--`` a ``#`` line is body: no edge and no ``annotation_unknown``.
+    body = analysis.cells["c3"]
+    assert (body.directives, body.after, body.diagnostics) == ([], [], [])
+    assert edges(analysis) == [("c0", "c1", ""), ("c1", "c2", "")]
+
+
+class DashNotes(Notes):
+    comment = "--"
+
+
+def test_a_dash_language_with_a_key_set_reads_only_those_keys(vocab):
+    vocab = vocab | cg.Vocabulary([cg.Annotation("app", in_key=False)])
+    source = "-- @app hide\n-- @after c0\n# @app shown\nSome notes."
+    analysis = cg.analyze(
+        [cg.Cell("c0", "x = 1"), cg.Cell("c1", source, language="notes")],
+        vocab,
+        analyzers={"python": cg.PythonAnalyzer(), "notes": DashNotes()},
+        normalization=cg.NORMALIZE_CELLGRAPH_1,
+    )
+    cell = analysis.cells["c1"]
+    assert cell.annotations == {"app": "hide"}
+    assert cell.diagnostics == [] and cell.after == [] and edges(analysis) == []
+    assert cell.normalized == "-- @after c0\n# @app shown\nSome notes."
 
 
 def test_directives_must_be_a_bool_or_a_frozenset():

@@ -6,7 +6,7 @@ import json
 from collections.abc import Mapping
 
 import pytest
-from test_languages import Words
+from test_languages import Dashes, Words
 from vestigo.provenance import derive_subkey as vestigo_subkey
 
 import cellgraph as cg
@@ -87,6 +87,49 @@ def test_cellgraph_1_strips_directives_and_uses_the_language_normalizer(vocab):
     expected = ["cellgraph-1", "definition", "y  x", {"mode": {"m": "fast"}}]
     assert cell.definition_key == sha(cg.canonical_json(expected))
     assert key("# @name other\n# @mode fast\ny  x").definition_key == cell.definition_key
+
+
+def test_cellgraph_1_strips_a_dash_languages_directives(vocab):
+    def key(source, language="dashes"):
+        return cg.analyze(
+            [cg.Cell("a", source, language=language)],
+            vocab,
+            analyzers={"dashes": Dashes(), "words": Words()},
+            normalization=cg.NORMALIZE_CELLGRAPH_1,
+            digest=cg.DIGEST_CELLGRAPH_1,
+        ).cells["a"]
+
+    cell = key("-- @name n\n-- @mode fast\ny  x  ")
+    assert cell.normalized == "y  x"
+    # The same key as the ``#`` spelling in a ``#`` language with the same normalizer.
+    assert cell.definition_key == key("# @name n\n# @mode fast\ny  x", "words").definition_key
+    assert key("-- @name other\n-- @mode fast\ny  x").definition_key == cell.definition_key
+    assert key("-- @name n\n-- @mode fast\ny  z").definition_key != cell.definition_key
+    # Under ``--`` a ``#`` line is body, so it stays in the normalized text.
+    assert key("# @mode fast\ny  x").normalized == "# @mode fast\ny  x"
+
+
+def test_a_hash_languages_cellgraph_1_definition_key_is_pinned(vocab):
+    def key(language, analyzer):
+        source = "# @name n\n# @mode fast\n# note\nx  =  1  # c\n"
+        return (
+            cg.analyze(
+                [cg.Cell("a", source, language=language)],
+                vocab,
+                analyzers={language: analyzer},
+                normalization=cg.NORMALIZE_CELLGRAPH_1,
+                digest=cg.DIGEST_CELLGRAPH_1,
+            )
+            .cells["a"]
+            .definition_key
+        )
+
+    assert key("python", cg.PythonAnalyzer()) == (
+        "8d63e86ec7024093a0cda8fa649016fe8c6ec311043ec004c8976db7679a8131"
+    )
+    assert key("words", Words()) == (
+        "c5eb8a85df924a5b93bcf0782a924d8df752ed9267cdca6c9a49fbee223395e7"
+    )
 
 
 def test_canonical_json_is_sorted_and_compact():

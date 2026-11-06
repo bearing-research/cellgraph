@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol
 
 from cellgraph.diagnostics import Diagnostic
+from cellgraph.grammar import check_marker
 
 if TYPE_CHECKING:
     from cellgraph.analysis import Cell
@@ -41,6 +42,10 @@ class LanguageAnalyzer(Protocol):
     directive, ``False`` none (markdown headings are ``#`` lines), and a frozenset
     of keys only those. A ``# @`` line whose key is not read is plain text: no
     annotation and no diagnostic.
+
+    It may also set ``comment``, the line comment marker its directive block uses:
+    ``#`` by default, ``--`` for SQL. The marker replaces ``#`` for that language,
+    and is independent of ``directives``.
     """
 
     owns_key: bool
@@ -64,6 +69,11 @@ def directive_keys(analyzer: LanguageAnalyzer) -> frozenset[str] | None:
     if isinstance(directives, frozenset) and all(isinstance(k, str) for k in directives):
         return frozenset(key.lower() for key in directives)
     raise TypeError(f"`directives` must be a bool or a frozenset of keys, not {directives!r}")
+
+
+def comment_marker(analyzer: LanguageAnalyzer) -> str:
+    """The comment marker of *analyzer*'s directive block; ``#`` when it sets none."""
+    return check_marker(getattr(analyzer, "comment", "#"))
 
 
 def strip_lines(source: str) -> str:

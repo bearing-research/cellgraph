@@ -400,7 +400,8 @@ def _parse_phase(
 ) -> tuple[CellAnalysis, Analyzed]:
     """Phase 1: the body's analysis, and every annotation's parser."""
     ca = CellAnalysis(id=cell.id, language=cell.language, source=cell.source)
-    ca.directives = vocabulary.grammar.directives(cell.source, keys=directive_keys(analyzer))
+    grammar = vocabulary.grammar_for(analyzer)
+    ca.directives = grammar.directives(cell.source, keys=directive_keys(analyzer))
 
     by_owner: dict[str, list[Directive]] = {}
     for directive in ca.directives:
