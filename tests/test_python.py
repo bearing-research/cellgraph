@@ -1,3 +1,6 @@
+import sys
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 
 import cellgraph as cg
@@ -90,13 +93,19 @@ CASES = [
     ("class C:\n    n = 3\n    vals = [i * n for i in range(2)]", ["C"], ["n"], []),
     # A method body runs later, so a name the cell binds after it is the cell's own.
     ("class C:\n    def m(self):\n        return k\nk = 1", ["C", "k"], [], []),
-    # A lambda body runs later, like a def body; its walrus binds in the lambda.
+    # A lambda or a generator is read where it is written, since most run at once;
+    # a lambda's walrus binds in the lambda.
     ("f = lambda: (y := 1)", ["f"], [], []),
-    ("f = lambda: y\ny = 1", ["f", "y"], [], []),
+    ("f = lambda: y\ny = 1", ["f", "y"], ["y"], []),
+    ("f = lambda: k\nf()\nk = 1", ["f", "k"], ["k"], []),
     ("f = lambda: y", ["f"], ["y"], []),
-    # A generator's elements run when it is iterated; its first iterable runs now.
-    ("g = (a + z for a in xs)\nz = 1", ["g", "z"], ["xs"], []),
+    ("f = lambda x, *a, k, **kw: (x, a, k, kw, y)", ["f"], ["y"], []),
+    ("class C:\n    n = 1\n    f = lambda: n", ["C"], ["n"], []),
+    ("g = (a + z for a in xs)\nz = 1", ["g", "z"], ["xs", "z"], []),
+    ("s = sum(y for _ in range(3))\ny = 2", ["s", "y"], ["y"], []),
     ("g = (a + z for a in xs)", ["g"], ["xs", "z"], []),
+    # A def body still runs later, so a name the cell binds after it is the cell's own.
+    ("def f():\n    return y\ny = 1", ["f", "y"], [], []),
     # A bare annotation binds nothing.
     ("x: int", [], [], []),
     ("x: int = 1", ["x"], [], []),
@@ -105,8 +114,44 @@ CASES = [
     ("df[col] = 1", ["df"], ["col", "df"], ["df"]),
     ("grid[i][j] = 0", ["grid"], ["grid", "i", "j"], ["grid"]),
     ("del d[k]", ["d"], ["d", "k"], ["d"]),
-    # ``except E as e`` unbinds e when the handler ends, so e is the handler's.
+    # ``except E as e`` unbinds e when the handler ends, so e is the handler's, also
+    # to a lambda or def in the handler, in a class body or not.
     ("try:\n    pass\nexcept ValueError as e:\n    print(e)", [], [], []),
+    ("try:\n    pass\nexcept E as e:\n    f = lambda: e", ["f"], ["E"], []),
+    ("try:\n    pass\nexcept E as e:\n    def g():\n        return e", ["g"], ["E"], []),
+    (
+        "class C:\n    try:\n        pass\n    except E as e:\n        f = lambda: e",
+        ["C"],
+        ["E"],
+        [],
+    ),
+    # Only the handler's: a def elsewhere reading e still reads the module's.
+    ("try:\n    pass\nexcept E as e:\n    pass\ndef g():\n    return e", ["g"], ["E", "e"], []),
+    # A handler inside a loop may continue it.
+    (
+        "for x in xs:\n    try:\n        f(x)\n    except E as e:\n        continue",
+        ["x"],
+        ["E", "f", "xs"],
+        [],
+    ),
+    # A name a class binds, a mutation in the class body is the class's own.
+    ("class A:\n    class Meta:\n        pass\n    Meta.ordering = ['x']", ["A"], [], []),
+    ("class A:\n    def m(self):\n        pass\n    m.flag = True", ["A"], [], []),
+    ("class A:\n    import os\n    os.sep = '/'", ["A"], [], []),
+    # Likewise at module level: a def, class or import binds the name first.
+    ("def m():\n    pass\nm.flag = True", ["m"], [], []),
+    ("import os\nos.environ['K'] = '1'", ["os"], [], []),
+    # A nested class body cannot see its enclosing class's names.
+    ("class A:\n    x = 2\n    class B:\n        y = x\nx = 1", ["A", "x"], ["x"], []),
+    # ... but its bases are evaluated in the enclosing class body.
+    ("class A:\n    Base = object\n    class B(Base):\n        pass", ["A"], [], []),
+    # ``del x`` unbinds x; binding it again defines it again.
+    ("x = 1\ndel x", [], [], []),
+    ("x = 1\ndel x\nx = 2", ["x"], [], []),
+    ("del x", [], ["x"], []),
+    # A form feed or a line separator in the source misplaces nothing.
+    ("r = await g()\n\x0c\ndef f():\n    return z", ["f", "r"], ["g", "z"], []),
+    ("s = 'a\u2028b'\nawait g()\ndef f():\n    return z", ["f", "s"], ["g", "z"], []),
 ]
 
 
@@ -120,6 +165,22 @@ def test_a_long_expression_is_analyzed():
     deep = "x = " + " + ".join(["a"] * 3000)
     assert names(deep) == (["x"], ["a"], [])
     assert normalize(deep) == deep
+
+
+def test_the_deep_retry_starts_afresh():
+    # The first walk fails inside the handler; a reused analyzer would keep e local.
+    deep = " + ".join(["a"] * 3000)
+    source = f"try:\n    pass\nexcept E as e:\n    w = {deep}\nprint(e)"
+    assert analyze_cell(source).references == ["E", "a", "e"]
+
+
+def test_deep_cells_on_threads_leave_the_recursion_limit_alone():
+    limit = sys.getrecursionlimit()
+    sources = [f"x{i} = " + " + ".join(["a"] * 3000) for i in range(8)]
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(analyze_cell, sources))
+    assert all(r.references == ["a"] for r in results)
+    assert sys.getrecursionlimit() == limit
 
 
 def test_a_cell_too_deep_to_walk_is_a_diagnostic_not_a_crash(monkeypatch):

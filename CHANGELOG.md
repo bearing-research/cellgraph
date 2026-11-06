@@ -9,12 +9,16 @@
     reads `n`; `df[col] = 1` reads `col`; `del df["c"]` and `del obj.a` mutate.
   - A mutation or a `del` reads the name even when the cell rebinds it later.
   - A class body runs when the class is defined: a name it reads before binding it
-    is a module read, and so is one its comprehensions read.
-  - A lambda body and a generator's elements run later, like a def body, so a name
-    the cell binds after them is its own, and a lambda's walrus binds nothing.
-  - `x: int` alone binds nothing, and `except E as e` leaves `e` unbound.
+    is a module read, and so is one its comprehensions, lambdas or nested classes
+    read. A name it binds by `def`, `class` or `import` is its own when mutated,
+    as one at module level is the cell's.
+  - A lambda's walrus binds nothing at module level.
+  - `x: int` alone binds nothing, `except E as e` leaves `e` unbound, also to a
+    lambda or def in the handler, and `x = 1; del x` defines no `x`.
   - A long expression is analyzed and normalized; one nested deeper than the
     analyzer can walk is the error `python_too_deep`, not a crash of `analyze`.
+    The retry under a higher recursion limit starts afresh, and holds a lock, so
+    threads analyzing at once leave the limit as they found it.
   - The analyzer's tests from Strata are ported. `python.imported_names`, unused,
     is gone, and `python.CellAnalysis` is `python.CellNames`.
 
