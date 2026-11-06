@@ -167,7 +167,19 @@ still gets names, edges, plannability and plan steps, and `execution_key` return
 `HostKeyed`.
 
 - `register_language_analyzer(language, analyzer)` and `get_language_analyzer(language)`.
-- `"python"` is registered on import as `PythonAnalyzer`.
+- `"python"` is registered on import as `PythonAnalyzer`. Module-level code runs in
+  order, so a name read before the cell binds it is a reference, and so are the
+  globals that function and class bodies read. A lambda or a generator is read
+  where it is written, since most run at once; a def body runs later, so a name
+  the cell binds after it is the cell's own. Names starting with `_` are the
+  cell's own and never cross cells, a star import binds nothing, `x: int` alone
+  binds nothing, `except E as e` leaves `e` unbound (to a lambda or def in the
+  handler too), and a top-level `del x` unbinds `x`, as Python does. Annotations
+  count as reads, whatever Python cellgraph runs on, since the kernel's may
+  evaluate them. A cell nested deeper than the analyzer can walk is the error
+  `python_too_deep`; one whose symbol table Python refuses (a module-level
+  `nonlocal`) is the warning `python_bodies_unread`, since what its function
+  bodies read is unknown.
 - `strip_lines` is the default normalizer.
 - A cell whose language has no analyzer raises `UnknownLanguageError` instead of
   silently dropping its references.

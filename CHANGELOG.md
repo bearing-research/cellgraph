@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+- The Python analyzer finds edges it missed, and drops ones it invented (#15):
+  - On Python 3.14, a cell with a top-level `await`, `async for` or `async with`
+    lost every name its functions and classes read, and their `global` writes.
+  - `async for` binds its target; `_ = expr` reads `expr`; `global n; n += 1`
+    reads `n`; `df[col] = 1` reads `col`; `del df["c"]` and `del obj.a` mutate.
+  - A mutation or a `del` reads the name even when the cell rebinds it later.
+  - A class body runs when the class is defined: a name it reads before binding it
+    is a module read, and so is one its comprehensions, lambdas or nested classes
+    read. A name it binds by `def`, `class` or `import` is its own when mutated,
+    as one at module level is the cell's.
+  - A lambda's walrus binds nothing at module level.
+  - `x: int` alone binds nothing, `except E as e` leaves `e` unbound, also to a
+    lambda or def in the handler, and rebinding or mutating `e` there defines
+    nothing. A top-level `x = 1; del x` defines no `x`.
+  - A cell whose symbol table Python refuses is the warning `python_bodies_unread`,
+    where its function bodies' reads were dropped silently.
+  - A long expression is analyzed and normalized; one nested deeper than the
+    analyzer can walk is the error `python_too_deep`, not a crash of `analyze`.
+    The retry under a higher recursion limit starts afresh, and holds a lock, so
+    threads analyzing at once leave the limit as they found it.
+  - The analyzer's tests from Strata are ported. `python.imported_names`, unused,
+    is gone, and `python.CellAnalysis` is `python.CellNames`.
+
 - One key scheme. `analyze` loses `normalization=` and `digest=`, and the
   `legacy-1` format (Strata's `compute_source_hash` and `compute_provenance_hash`)
   is gone with `compute_provenance_hash`, `Resolved.legacy` and the four
