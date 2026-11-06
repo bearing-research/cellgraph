@@ -14,15 +14,15 @@ import re
 from collections.abc import Container, Iterator
 from dataclasses import dataclass
 
-# Where Python breaks a line. ``str.splitlines`` also breaks at a form feed, \x1c to
-# \x1e, \x85, \u2028 and \u2029, which Python keeps inside a line, a comment or a
-# string.
-_LINE_BREAK = re.compile(r"\r\n|\r|\n")
+# ``str.splitlines`` also breaks at these, which Python keeps inside a line, a comment
+# or a string. Another language may break at one (JavaScript at \u2028), so a block
+# line holding one is body: no language reads a directive across it.
+_OTHER_BREAKS = re.compile("[\x0b\x0c\x1c-\x1e\x85\u2028\u2029]")
 
 
 def source_lines(source: str) -> list[str]:
-    """*source*'s lines, split as Python splits them; like ``splitlines`` otherwise."""
-    lines = _LINE_BREAK.split(source)
+    """*source*'s lines, split at ``\n``, ``\r\n`` and ``\r`` as Python splits them."""
+    lines = source.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     if lines[-1] == "":
         lines.pop()
     return lines
@@ -108,7 +108,7 @@ class Grammar:
             stripped = line.strip()
             if not stripped:
                 continue
-            if not stripped.startswith(self.marker):
+            if not self._in_block(stripped):
                 break
             yield lineno, line
 
@@ -133,7 +133,7 @@ class Grammar:
         lines = source_lines(source)
         for i, line in enumerate(lines):
             stripped = line.strip()
-            if not stripped or stripped.startswith(self.marker):
+            if not stripped or self._in_block(stripped):
                 continue
             return "\n".join(lines[i:])
         return ""
@@ -176,7 +176,7 @@ class Grammar:
             lines.insert(directives[-1] + 1 if directives else 0, new_line)
 
         result = sep.join(lines)
-        return result + sep if source.endswith("\n") else result
+        return result + sep if source.endswith(("\n", "\r")) else result
 
     def remove_directive(self, source: str, key: str) -> str:
         """Return *source* with every ``<marker> @key`` directive removed from the block."""
@@ -190,15 +190,19 @@ class Grammar:
             if not (i < end and (d := self.parse_directive(line)) is not None and d[0] == key)
         ]
         result = sep.join(kept)
-        return result + sep if source.endswith("\n") else result
+        return result + sep if source.endswith(("\n", "\r")) else result
 
     def _block_end(self, lines: list[str]) -> int:
         """Index of the first body line: the end of the leading comment block."""
         for i, line in enumerate(lines):
             stripped = line.strip()
-            if stripped and not stripped.startswith(self.marker):
+            if stripped and not self._in_block(stripped):
                 return i
         return len(lines)
+
+    def _in_block(self, stripped: str) -> bool:
+        """Whether a non-blank, stripped line belongs to the leading comment block."""
+        return stripped.startswith(self.marker) and not _OTHER_BREAKS.search(stripped)
 
     def _format(self, key: str, value: str) -> str:
         value = value.strip()
@@ -206,8 +210,10 @@ class Grammar:
 
     @staticmethod
     def _line_sep(source: str) -> str:
-        """The dominant line ending, so a splice preserves CRLF vs LF."""
-        return "\r\n" if "\r\n" in source else "\n"
+        """The dominant line ending, so a splice preserves CRLF, CR or LF."""
+        if "\r\n" in source:
+            return "\r\n"
+        return "\r" if "\r" in source else "\n"
 
 
 GRAMMAR = Grammar()

@@ -150,10 +150,29 @@ def test_a_subclass_regex_and_init_work_as_before():
     assert OwnInit().with_marker("--").directives("-- @a 1") == [Directive("a", "1", 1)]
 
 
-@pytest.mark.parametrize("brk", ["\x0c", "\x1c", "\x85", "\u2028", "\u2029"])
-def test_a_line_breaks_only_where_python_breaks_it(brk):
-    # To Python, each of these is inside a line: the directive is all one comment.
-    source = f"# @a 1{brk}x = 1\ny = 2"
-    assert [d.line for d in GRAMMAR.directives(source)] == [1]
-    assert GRAMMAR.strip_directives(source) == "y = 2"
+def test_a_line_breaks_only_where_python_breaks_it():
     assert source_lines("a\r\nb\rc\nd\n") == ["a", "b", "c", "d"]
+    assert source_lines("a\x0cb\u2028c") == ["a\x0cb\u2028c"]
+    assert source_lines("") == []
+
+
+@pytest.mark.parametrize("brk", ["\x0b", "\x0c", "\x1c", "\x85", "\u2028", "\u2029"])
+def test_a_block_line_holding_another_break_is_body(brk):
+    # Python reads one comment; JavaScript breaks at \u2028, and reads code after it.
+    source = f"# @a 1{brk}x = 1\ny = 2"
+    assert GRAMMAR.directives(source) == []
+    assert GRAMMAR.strip_directives(source) == source
+    assert GRAMMAR.strip(source) == source
+    # As blank space around a line, it is not inside it.
+    assert GRAMMAR.directives(f"{brk}\n# @a 1{brk}\nx = 1") == [Directive("a", "1", 2)]
+
+
+def test_a_splice_keeps_a_lone_cr():
+    assert GRAMMAR.set_directive("# @a 1\rx = 1\r", "b", "2") == "# @a 1\r# @b 2\rx = 1\r"
+    assert GRAMMAR.remove_directive("# @a 1\rx = 1\r", "a") == "x = 1\r"
+
+
+def test_a_splice_leaves_a_line_holding_another_break_whole():
+    source = "# @a 1\x0cx = 1\n"
+    assert GRAMMAR.set_directive(source, "a", "2") == "# @a 2\n# @a 1\x0cx = 1\n"
+    assert GRAMMAR.remove_directive(source, "a") == source

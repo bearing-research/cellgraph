@@ -6,10 +6,14 @@
   - Lines break only at `\n`, `\r\n` and `\r`, as in Python. A form feed,
     `\u2028` and the others `str.splitlines` also breaks at stay inside the line,
     so `# note\x0cx = 1` (one comment) and `# note\nx = 1` no longer share a
-    definition key, nor two strings that differ by one of them.
+    definition key, nor two strings that differ by one of them. Another language
+    may break there (JavaScript at `\u2028`), so a directive-block line with one
+    inside it is body, and ends the block. `set_directive` and `remove_directive`
+    keep a lone `\r` line ending.
   - A lone surrogate, as a truncated emoji in a notebook file leaves, is a
-    `syntax_error` in Python and is hashed in any language, where `analyze`
-    raised `UnicodeEncodeError`.
+    `syntax_error` in Python and is keyed in any language, where `analyze`
+    raised `UnicodeEncodeError`: `canonical_json` escapes it as `\udXXX`, as
+    JavaScript's `JSON.stringify` does.
   - A variant member too deep to parse is `python_too_deep`, where `analyze`
     raised `MemoryError`.
   - `strip_lines`, and Python's fallback for source it cannot parse, keep the

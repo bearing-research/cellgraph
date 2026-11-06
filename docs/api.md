@@ -18,7 +18,9 @@ A cell's directives are its leading block of comment lines that read
 `# @key value`. Blank lines and other comments may sit in the block, and the block
 ends at the first line of body. Keys are lower-cased and values stripped. Lines
 break where Python breaks them, at `\n`, `\r\n` or `\r`: a form feed or `\u2028`
-is inside a line, as it is in a Python comment or string.
+is inside a line, as it is in a Python comment or string. Another language may
+break there (JavaScript at `\u2028`), so a block line with one inside it is body,
+and ends the block.
 
 The comment marker is the cell language's: `#` by default, and whatever its
 analyzer declares as `comment` otherwise (see Languages). The marker replaces `#`
@@ -402,12 +404,14 @@ What `parts` shows is exactly what the key covers: each component sits next to
 its address, so swapping two variables' contents changes the key.
 
 `derive_subkey(parent, *labels)` is `sha256("parent:label1:...")`, byte-identical
-to vestigo's; a label containing `:` is refused. `canonical_json` sorts keys, has
-no whitespace and keeps UTF-8 as is. It takes only what `is_canonical` accepts
+to vestigo's; a label containing `:` is refused, and one holding a lone surrogate
+cannot be encoded. `canonical_json` sorts keys, has no whitespace and keeps UTF-8
+as is, but escapes a lone surrogate (a truncated emoji) as `\udXXX`, as
+JavaScript's `JSON.stringify` does. It takes only what `is_canonical` accepts
 (None, bool, an int of at most 640 digits, finite float, str, and lists and
-str-keyed dicts of these), which is also the rule for a key field: `json` would turn `{1: "a"}` into
-`{"1": "a"}` and a tuple into a list, so two values would share a key. Anything
-else is a `TypeError`. Fan-out and sweep components are JSON lists of
+str-keyed dicts of these), which is also the rule for a key field: `json` would
+turn `{1: "a"}` into `{"1": "a"}` and a tuple into a list, so two values would
+share a key. Anything else is a `TypeError`. Fan-out and sweep components are JSON lists of
 `[name, component]` pairs, so no host string can forge another instance.
 
 ## Planning

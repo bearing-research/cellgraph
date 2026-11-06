@@ -395,3 +395,20 @@ def test_the_int_bound_is_the_same_in_every_process():
             assert not cg.is_canonical(-(10**640))
     finally:
         sys.set_int_max_str_digits(previous)
+
+
+def test_a_lone_surrogate_is_escaped_and_keyed(vocab):
+    # A truncated emoji in a notebook file leaves one; JSON.stringify writes \\ud800.
+    assert cg.canonical_json(["a\ud800", {"k\udfff": 1}]) == '["a\\ud800",{"k\\udfff":1}]'
+    assert cg.canonical_json("a\ud800") != cg.canonical_json("a\\ud800")
+    words = key_of(vocab, "y x\ud800")
+    assert words.definition_key not in (None, key_of(vocab, "y x").definition_key)
+    field = key_of(vocab, "# @mode f\ud800\ny x")
+    assert field.definition_key not in (None, key_of(vocab, "# @mode f\ny x").definition_key)
+
+
+def test_derive_subkey_hashes_as_vestigo_does():
+    expected = hashlib.sha256(b"p:a:b").hexdigest()
+    assert cg.derive_subkey("p", "a", "b") == expected
+    with pytest.raises(UnicodeEncodeError):
+        cg.derive_subkey("p", "\ud800")
