@@ -5,8 +5,8 @@ import inspect
 from collections.abc import Mapping
 
 import pytest
+from conftest import prov
 from test_languages import Dashes, Words
-from vestigo.provenance import derive_subkey as vestigo_subkey
 
 import cellgraph as cg
 from cellgraph import analysis as analysis_module
@@ -15,7 +15,7 @@ from cellgraph import keys
 ENV = "e" * 64
 PINNED_PYTHON = "9128183dbea770ce61d4daac885cf2abee76c61a706899381b13733ff2dcaba0"
 PINNED_WORDS = "1110e0b11269113eec716724f514a30bbb858f34086badd5609e163e953e6b55"
-PINNED_EXECUTION = "4fe3633fe1bfbcdbb10106093e512598c0bee6613e22c7eb29698462fb64748d"
+PINNED_EXECUTION = "e5432f01bb825aae2afe911987334173de492ef944eb22ddbccf9fe603f1d2d0"
 
 
 def sha(text):
@@ -130,7 +130,7 @@ def test_an_execution_key_is_the_digest_of_its_parts(run):
         "definition_key": analysis.cells["c1"].definition_key,
         "fields": {},
         "env_hash": ENV,
-        "upstream": [["output:c0.x", "h0"]],
+        "upstream": [["output:c0.x", prov("h0")]],
         "inputs": [],
     }
     assert cg.PARTS_SCHEMA == 2
@@ -152,15 +152,18 @@ def test_which_variable_a_component_is_counts(run):
     assert key("d1", "d2").digest != key("d2", "d1").digest
 
 
-def test_run_identity_is_tagged_content_or_run(run):
+def test_every_output_component_is_tagged(run):
     analysis = run("x = 1", "y = x")
 
     def component(ref):
         key = analysis.execution_key("c1", published=published(c0=out(x=ref)), env_hash=ENV)
         return key.parts["upstream"][0][1]
 
-    assert component(cg.OutputRef(cg.Run("r1"))) == "run:r1"
-    assert component(cg.OutputRef(cg.Run("r1"), content_digest="d")) == "content:d"
+    assert component(cg.OutputRef(cg.Run("r1"))) == '["run","r1"]'
+    assert component(cg.OutputRef(cg.Run("r1"), content_digest="d")) == '["content","d"]'
+    assert component(cg.OutputRef(cg.Provenance("h"))) == '["provenance","h"]'
+    # A host's string cannot pass for another kind.
+    assert component(cg.OutputRef(cg.Provenance("run:r1"))) != component(cg.OutputRef(cg.Run("r1")))
 
 
 def test_a_nocache_upstream_is_keyed_by_its_bytes(run):
@@ -169,7 +172,26 @@ def test_a_nocache_upstream_is_keyed_by_its_bytes(run):
     snapshot = out(x=ref, unread=cg.OutputRef(cg.Provenance("h1"), content_digest="d1"))
     key = analysis.execution_key("c1", published=published(c0=snapshot), env_hash=ENV)
     # Only what the reader reads, and by content.
-    assert key.parts["upstream"] == [["output:c0.x", vestigo_subkey("h0", "content=d0")]]
+    assert key.parts["upstream"] == [["output:c0.x", '["nocache","h0","d0"]']]
+
+
+def test_a_content_digest_may_hold_any_character(run):
+    analysis = run("# @nocache\nx = 1", "y = x")
+    ref = cg.OutputRef(cg.Provenance("h0"), content_digest="sha256:d0")
+    key = analysis.execution_key("c1", published=published(c0=out(x=ref)), env_hash=ENV)
+    assert key.parts["upstream"] == [["output:c0.x", '["nocache","h0","sha256:d0"]']]
+
+
+def test_a_nocache_upstream_is_read_only_for_what_it_gives(run):
+    # x comes from c1, so c0's x has no bytes the reader needs.
+    analysis = run("# @nocache\nx = 1\ny = 1", "x = 2", "z = x + y")
+    snapshot = published(
+        c0=out(x=cg.OutputRef(cg.Provenance("h0")), y=cg.OutputRef(cg.Provenance("hy"), "dy")),
+        c1=out(x="h1"),
+    )
+    key = analysis.execution_key("c2", published=snapshot, env_hash=ENV)
+    assert isinstance(key, cg.Keyed)
+    assert ["output:c0.y", '["nocache","hy","dy"]'] in key.parts["upstream"]
 
 
 def test_a_nocache_upstream_without_a_digest_is_unavailable(run):
@@ -186,14 +208,14 @@ def test_an_unreadable_output_is_unavailable(run):
     key = analysis.execution_key("c1", published=published(c0=snapshot), env_hash=ENV)
     assert isinstance(key, cg.Unavailable)
     assert key.unresolved == ("output:c0.x",)
-    assert key.parts["upstream"] == [["output:c0.z", "hz"]]
+    assert key.parts["upstream"] == [["output:c0.z", prov("hz")]]
 
 
 def test_the_older_cell_level_ref(run):
     analysis = run("x = 1", "y = x")
     snapshot = cg.Published(cell_ref=cg.OutputRef(cg.Provenance("hc")))
     key = analysis.execution_key("c1", published=published(c0=snapshot), env_hash=ENV)
-    assert key.parts["upstream"] == [["cell:c0", "hc"]]
+    assert key.parts["upstream"] == [["cell:c0", prov("hc")]]
 
 
 def test_a_shadowed_name_adds_its_wired_producer(run):
@@ -201,7 +223,8 @@ def test_a_shadowed_name_adds_its_wired_producer(run):
     analysis = run("x = 1\nz = 1", "x = 2", "y = x + z")
     snapshot = published(c0=out(x="h0", z="hz"), c1=out(x="h1"))
     key = analysis.execution_key("c2", published=snapshot, env_hash=ENV)
-    assert ["wired:c1.x", cg.canonical_json(["wired", "x", "h1"])] in key.parts["upstream"]
+    wired = cg.canonical_json(["wired", "x", ["provenance", "h1"]])
+    assert ["wired:c1.x", wired] in key.parts["upstream"]
     assert not any(address.startswith("wired:c0") for address, _ in key.parts["upstream"])
 
 
@@ -237,7 +260,7 @@ def test_an_unresolved_input_keeps_the_parts_it_built(run):
     )
     assert isinstance(key, cg.Unavailable)
     assert key.unresolved == ("input:file:data",)
-    assert key.parts["upstream"] == [["output:c0.x", "h0"]]
+    assert key.parts["upstream"] == [["output:c0.x", prov("h0")]]
 
 
 def test_a_host_keyed_language_gets_no_digest(vocab):
@@ -252,7 +275,7 @@ def test_a_host_keyed_language_gets_no_digest(vocab):
     key = analysis.execution_key("a", published=published(p=out(y="hp")), env_hash=ENV)
     assert isinstance(key, cg.HostKeyed)
     # What it reads upstream, for the host's own key.
-    assert key.parts["upstream"] == [["output:p.y", "hp"]]
+    assert key.parts["upstream"] == [["output:p.y", prov("hp")]]
     assert key.parts["inputs"] == [] and key.unresolved == ()
     # An upstream it cannot read is named, so the host does not key on what is there.
     snapshot = out(y=cg.Unavailable("gone"))
@@ -267,7 +290,7 @@ def test_a_blocked_cell_and_its_dependents_are_keyed(run):
     blocked = analysis.execution_key("c0", published=published(), env_hash=ENV)
     assert blocked.digest == cg.parts_digest(blocked.parts)
     below = analysis.execution_key("c1", published=published(c0=out(x="h0")), env_hash=ENV)
-    assert below.parts["upstream"] == [["output:c0.x", "h0"]]
+    assert below.parts["upstream"] == [["output:c0.x", prov("h0")]]
 
 
 def _unreadable(directives):
@@ -353,3 +376,8 @@ def test_an_analysis_method_takes_what_its_function_takes(name):
     """The method restates the function's signature for its types; the two must agree."""
     method = _signature(getattr(cg.Analysis, name), analysis_module)
     assert method == _signature(getattr(keys, name), keys)
+
+
+def test_an_int_json_cannot_write_is_not_canonical():
+    assert cg.is_canonical(10**100)
+    assert not cg.is_canonical(10**5000)

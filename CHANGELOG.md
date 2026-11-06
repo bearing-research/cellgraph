@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- Execution keys count what each upstream makes, and every output component is
+  tagged (#20):
+  - An output a cell does not read is keyed as its upstream makes it, a sweep
+    member's as its variant's, not by whichever cell defines that name last. A
+    cell after a reader changed the reader's key, and a fan-out instance read
+    another variant's outputs (any it published beyond its defines, or as one cell
+    ref, too).
+  - A no-cache upstream is read only for the variables the cell takes from it, so
+    one the cell reads from another producer no longer leaves the key
+    `Unavailable`.
+  - An output's component is a tagged list: `["provenance", hash]`,
+    `["nocache", hash, digest]`, `["content", digest]` or `["run", id]`.
+    `Provenance("run:r1")` and `Run("r1")` shared a component, and a content digest
+    with a `:` in it (`sha256:...`) made `execution_key` raise.
+  - `is_canonical` refuses an int too long for `json` to write, so such a key
+    field is `<key>_unencodable` where `analyze` raised.
+  - Every output an upstream publishes still counts, read or not: a read the
+    analyzer cannot see stays covered. docs/api.md says so, and what it costs.
+
 - CI runs on Linux, macOS and Windows, and a release is also a GitHub release
   (#19):
   - The suite runs on each of Python 3.12, 3.13 and 3.14 on all three, in CI and

@@ -262,7 +262,8 @@ it, so check `dag.inactive_cells` first.
   planning.
 - `execution_key(...)` and `plan(...)`, described below.
 - `variant_read(cell_id, upstream_id, var, instance=None)`: what the cell (or one
-  of its instances) reads of `var` from `upstream_id` when a sweep makes it, as
+  of its instances) reads of `var` from `upstream_id` when a sweep makes it (for
+  a name the cell does not read, when `upstream_id` is in a sweep), as
   `VariantRead(variants, scalar, fanout)`, or None. `scalar` is an instance's own
   group, read as its variant's value; otherwise the `{variant: value}` dict.
   `fanout` says the variants are one fan-out cell's instances. No variants is
@@ -326,11 +327,19 @@ analysis.execution_key(cell_id, *, instance=None, published, resolve=None, env_h
     in `instances`.
   - `cell_ref` is the older single cell-level output.
 - `identity` is `Provenance(hash)` for an output filed under a reusable key, or
-  `Run(id)` for one that had none. Run outputs become `content:<digest>`, or
-  `run:<id>` without a digest.
-- A `NoCache` upstream is keyed by its bytes, as
-  `derive_subkey(hash, "content=<digest>")`, and only for the variables the reader
-  reads.
+  `Run(id)` for one that had none. An output's component is a tagged list, so no
+  host string passes for another kind: `["provenance", hash]`, and for a run
+  `["content", digest]`, or `["run", id]` without a digest.
+- A `NoCache` upstream's `Provenance` output is keyed by its bytes, as
+  `["nocache", hash, digest]`, and only for the variables the reader takes from
+  it. A `Run` output is keyed as above, no-cache or not.
+- Every output an upstream publishes counts, read or not, and as that upstream
+  makes it: a sweep member's as its variant's, a fan-out cell's as its instances.
+  This is deliberately conservative: a read the analyzer cannot see (`eval`,
+  `globals()[...]`) is still covered. It costs reruns: a cell reruns when an
+  output it does not read changes, and an `@each` item key counts its source
+  cell's other outputs. A variable missing from `outputs`, or an instance missing
+  from `instances` (not run yet), is left out.
 - `resolve[kind](input) -> Resolved(identity, fingerprint)` or `Unavailable`;
   `Resolver` is that callable's type. Both values must be canonical JSON, and the
   component is `canonical_json([kind, name, identity, fingerprint])`, which
@@ -348,12 +357,13 @@ Results:
 
 - `Keyed(digest, parts)`.
 - `Unavailable(reason, parts, unresolved)`: an unreadable output, a no-cache
-  output without a content digest (its key follows its bytes), an unresolved
+  `Provenance` output without a content digest (its key follows its bytes), an unresolved
   input, or an in-key annotation missing from the fields (`field:<key>`).
 - `HostKeyed(parts, unresolved)`: for a language with `owns_key=False`. `parts`
   holds the upstream components it reads and no inputs; the host adds its own and
-  keys them with `parts_digest`, building each with `input_component`. `unresolved` names the upstreams that could not
-  be read, as `Unavailable` would.
+  keys them with `parts_digest`, building each with `input_component`.
+  `unresolved` names what could not be read, as `Unavailable` would: upstreams,
+  and `field:<key>` for an in-key annotation missing from the fields.
 
 A blocked cell is keyed too, as are the cells downstream of it: a result cached
 under its key is still its result, and whether it may run is `plannable`. A cell a
@@ -371,7 +381,8 @@ it, so a host can pass a mapping that reads its store on demand.
 - `upstream`: `[address, component]` pairs, with addresses `output:`, `cell:`,
   `wired:`, `variant:`, `sweep:`, `instances:` and `each:`. An `output:` or
   `cell:` component is the output's own, as above; the others are canonical JSON
-  lists that begin with their kind: `["wired", var, component]`,
+  lists that begin with their kind and nest that list:
+  `["wired", var, component]`,
   `["variant", var, name, component]`, `["sweep", var, [[name, component], ...]]`,
   `["variant" or "fanout", var, [[name, component], ...]]` under `instances:`, and
   `["each", key, digest]`;
@@ -387,7 +398,8 @@ its address, so swapping two variables' contents changes the key.
 `derive_subkey(parent, *labels)` is `sha256("parent:label1:...")`, byte-identical
 to vestigo's; a label containing `:` is refused. `canonical_json` sorts keys, has
 no whitespace and keeps UTF-8 as is. It takes only what `is_canonical` accepts
-(None, bool, int, finite float, str, and lists and str-keyed dicts of these),
+(None, bool, an int `json` can write, finite float, str, and lists and str-keyed
+dicts of these),
 which is also the rule for a key field: `json` would turn `{1: "a"}` into
 `{"1": "a"}` and a tuple into a list, so two values would share a key. Anything
 else is a `TypeError`. Fan-out and sweep components are JSON lists of

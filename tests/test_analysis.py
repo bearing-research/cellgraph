@@ -548,6 +548,12 @@ def test_a_bug_in_a_converter_propagates(vocab):
         cg.analyze([cg.Cell("c0", "# @tier b\nx = 1")], vocab)
 
 
+def test_a_field_too_large_to_write_is_unencodable():
+    host = cg.Vocabulary([cg.Annotation("big", parse=cg.scalar(lambda s: 10 ** int(s)))])
+    analysis = cg.analyze([cg.Cell("c0", "# @big 5000\nx = 1")], cg.Vocabulary.core() | host)
+    assert codes(analysis) == ["big_unencodable"]
+
+
 def test_an_encoder_that_raises_is_unencodable(vocab):
     def encode(value):
         raise cg.AnnotationError("no encoding")
