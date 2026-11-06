@@ -2,6 +2,7 @@
 
 import hashlib
 import inspect
+import sys
 from collections.abc import Mapping
 
 import pytest
@@ -381,3 +382,16 @@ def test_an_analysis_method_takes_what_its_function_takes(name):
 def test_an_int_json_cannot_write_is_not_canonical():
     assert cg.is_canonical(10**100)
     assert not cg.is_canonical(10**5000)
+
+
+def test_the_int_bound_is_the_same_in_every_process():
+    # 640 digits is the lowest limit sys.set_int_max_str_digits allows.
+    previous = sys.get_int_max_str_digits()
+    try:
+        for limit in (0, 640, 100_000):
+            sys.set_int_max_str_digits(limit)
+            assert cg.is_canonical(10**640 - 1)
+            assert not cg.is_canonical(10**640)
+            assert not cg.is_canonical(-(10**640))
+    finally:
+        sys.set_int_max_str_digits(previous)

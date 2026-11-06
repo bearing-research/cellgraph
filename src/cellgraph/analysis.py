@@ -167,9 +167,11 @@ class Dag:
         return self.wired_inputs.get(consumer_id, {}).get(producer_id, set())
 
     def read_producer(self, consumer_id: str, var: str) -> str | SweepProducer | None:
-        """What ``consumer_id`` reads ``var`` from; its last producer for a name it never reads."""
-        reads = self.read_producers.get(consumer_id, {})
-        return reads[var] if var in reads else self.variable_producer.get(var)
+        """What ``consumer_id`` reads ``var`` from; None for a name it does not read.
+
+        Not the name's last producer: that may be a cell after the reader.
+        """
+        return self.read_producers.get(consumer_id, {}).get(var)
 
     def sweep_groups_read(self, consumer_id: str) -> set[str]:
         """The groups whose sweep (or fan-out over it) ``consumer_id`` reads."""

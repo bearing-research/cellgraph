@@ -38,6 +38,10 @@ def derive_subkey(parent_hash: str, *labels: str) -> str:
     return hashlib.sha256(":".join([parent_hash, *labels]).encode()).hexdigest()
 
 
+# json writes an int of up to 640 digits under every int_max_str_digits setting.
+_INT_BOUND = 10**640
+
+
 def is_canonical(value: Any) -> bool:
     """None, bool, int, finite float, str, and lists and str-keyed dicts of these.
 
@@ -47,12 +51,8 @@ def is_canonical(value: Any) -> bool:
     if value is None or isinstance(value, bool | str):
         return True
     if isinstance(value, int):
-        # Past sys.get_int_max_str_digits(), json cannot write it.
-        try:
-            str(value)
-        except ValueError:
-            return False
-        return True
+        # Under any sys.set_int_max_str_digits (640 at least), so every process agrees.
+        return -_INT_BOUND < value < _INT_BOUND
     if isinstance(value, float):
         return math.isfinite(value)
     if isinstance(value, list):
@@ -235,9 +235,7 @@ def variant_read(
     A name the cell does not read is taken as its upstream makes it (a sweep member's,
     or a fan-out cell's instances), not as whichever cell defines it last.
     """
-    graph = analysis.graph
-    reads = graph.read_producers.get(cell_id, {})
-    producer = reads[var] if var in reads else _role(analysis, upstream_id)
+    producer = analysis.graph.read_producer(cell_id, var) or _role(analysis, upstream_id)
     return _read_of(analysis, producer, cell_id, upstream_id, instance)
 
 
@@ -344,6 +342,8 @@ def _upstream(
     published: Callable[[str], Published],
     without: str | None = None,
 ) -> _Assembly:
+    from cellgraph.analysis import SweepProducer
+
     graph = analysis.graph
     assembly = _Assembly()
     upstream_ids = graph.cell_upstream.get(cell_id, [])
@@ -351,24 +351,31 @@ def _upstream(
         return assembly
 
     shadowed = shadowed_reads(analysis, cell_id)
+    reads = graph.read_producers.get(cell_id, {})
+    ordered = {e.from_cell_id for e in graph.edges if e.to_cell_id == cell_id and not e.variable}
 
-    sweep_buckets: dict[str, list[tuple[str, list[str]]]] = {}
+    # By group and variable: two sweeps may each make a y the cell does not read.
+    sweep_buckets: dict[tuple[str, str], list[tuple[str, list[str]]]] = {}
     for upstream_id in upstream_ids:
         upstream = analysis.cells.get(upstream_id)
         if upstream is None:
             continue
         by_content = upstream.nocache
         wired = graph.wired_variables(cell_id, upstream_id)
-        own = _read_of(analysis, _role(analysis, upstream_id), cell_id, upstream_id, instance)
-        if own is not None and not own.fanout and not own.variants:
-            continue  # another variant's member, which this instance does not read
+        # What the upstream is, for an output the cell does not read.
+        role = _role(analysis, upstream_id)
         snapshot = published(upstream_id)
 
         names = list(snapshot.outputs)
         if not names and snapshot.cell_ref is not None:
-            value = assembly.component(snapshot.cell_ref, by_content, f"cell:{upstream_id}")
-            if value is not None:
-                assembly.add(f"cell:{upstream_id}", canonical_json(value))
+            own = _read_of(analysis, role, cell_id, upstream_id, instance)
+            # Another variant's member, unless the cell reads from it or orders after it.
+            others = own is not None and not own.fanout and not own.variants
+            direct = upstream_id in ordered or any(reads.get(v) == upstream_id for v in wired)
+            if not others or direct:
+                value = assembly.component(snapshot.cell_ref, by_content, f"cell:{upstream_id}")
+                if value is not None:
+                    assembly.add(f"cell:{upstream_id}", canonical_json(value))
 
         # An output is looked up only once it counts, so a host's mapping can be lazy.
         for var in names:
@@ -377,7 +384,8 @@ def _upstream(
                 continue
             if var == without:
                 continue
-            read = variant_read(analysis, cell_id, upstream_id, var, instance)
+            producer = reads[var] if var in reads else role
+            read = _read_of(analysis, producer, cell_id, upstream_id, instance)
             if read is not None and read.fanout:
                 parts: list[list[Any]] = []
                 for name in read.variants:
@@ -389,20 +397,26 @@ def _upstream(
                     )
                     if value is not None:
                         parts.append([name, value])
-                # A list, not a joined string: a host's run id may hold any separator.
-                prefix = "variant" if read.scalar else "fanout"
-                assembly.add(
-                    f"instances:{upstream_id}.{var}", canonical_json([prefix, var, sorted(parts)])
-                )
-                continue
+                if parts or any(v == var for v, _ in snapshot.instances):
+                    # A list, not a joined string: a host's run id may hold any separator.
+                    prefix = "variant" if read.scalar else "fanout"
+                    assembly.add(
+                        f"instances:{upstream_id}.{var}",
+                        canonical_json([prefix, var, sorted(parts)]),
+                    )
+                    continue
+                read = None  # published once, not per instance: an ordinary output
             if read is not None and not read.variants:
-                continue  # another variant's member
+                if upstream_id not in ordered:
+                    continue  # another variant's member
+                read = None  # but ordered after, so counted as it is
             value = assembly.component(
                 snapshot.outputs[var], by_content, f"output:{upstream_id}.{var}"
             )
             if value is None:
                 continue
             if read is not None:
+                assert isinstance(producer, SweepProducer)
                 for name in read.variants:
                     if read.scalar:
                         assembly.add(
@@ -410,15 +424,15 @@ def _upstream(
                             canonical_json(["variant", var, name, value]),
                         )
                     else:
-                        sweep_buckets.setdefault(var, []).append((name, value))
+                        sweep_buckets.setdefault((producer.group, var), []).append((name, value))
                 continue
             assembly.add(f"output:{upstream_id}.{var}", canonical_json(value))
             if var in shadowed and var in wired:
                 assembly.add(f"wired:{upstream_id}.{var}", canonical_json(["wired", var, value]))
 
-    for var, pairs in sweep_buckets.items():
+    for (group, var), pairs in sweep_buckets.items():
         members = sorted([name, value] for name, value in pairs)
-        assembly.add(f"sweep:{var}", canonical_json(["sweep", var, members]))
+        assembly.add(f"sweep:{group}.{var}", canonical_json(["sweep", group, var, members]))
     return assembly
 
 

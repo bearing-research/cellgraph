@@ -325,7 +325,9 @@ analysis.execution_key(cell_id, *, instance=None, published, resolve=None, env_h
     `Unavailable` when it is published but unreadable.
   - A fan-out cell lists each variable in `outputs` and each `(variable, variant)`
     in `instances`.
-  - `cell_ref` is the older single cell-level output.
+  - `cell_ref` is the older single cell-level output. An instance leaves out
+    another variant's, unless it reads from that cell or orders after it
+    (`@seed`, `@after`).
 - `identity` is `Provenance(hash)` for an output filed under a reusable key, or
   `Run(id)` for one that had none. An output's component is a tagged list, so no
   host string passes for another kind: `["provenance", hash]`, and for a run
@@ -383,9 +385,11 @@ it, so a host can pass a mapping that reads its store on demand.
   `cell:` component is the output's own, as above; the others are canonical JSON
   lists that begin with their kind and nest that list:
   `["wired", var, component]`,
-  `["variant", var, name, component]`, `["sweep", var, [[name, component], ...]]`,
+  `["variant", var, name, component]`,
+  `["sweep", group, var, [[name, component], ...]]` under `sweep:<group>.<var>`,
   `["variant" or "fanout", var, [[name, component], ...]]` under `instances:`, and
-  `["each", key, digest]`;
+  `["each", key, digest]`. A fan-out cell's output with no instances (one it
+  publishes once) is an `output:`;
 - `inputs`: `[kind, name, component]`.
 
 ```
@@ -398,9 +402,8 @@ its address, so swapping two variables' contents changes the key.
 `derive_subkey(parent, *labels)` is `sha256("parent:label1:...")`, byte-identical
 to vestigo's; a label containing `:` is refused. `canonical_json` sorts keys, has
 no whitespace and keeps UTF-8 as is. It takes only what `is_canonical` accepts
-(None, bool, an int `json` can write, finite float, str, and lists and str-keyed
-dicts of these),
-which is also the rule for a key field: `json` would turn `{1: "a"}` into
+(None, bool, an int of at most 640 digits, finite float, str, and lists and
+str-keyed dicts of these), which is also the rule for a key field: `json` would turn `{1: "a"}` into
 `{"1": "a"}` and a tuple into a list, so two values would share a key. Anything
 else is a `TypeError`. Fan-out and sweep components are JSON lists of
 `[name, component]` pairs, so no host string can forge another instance.

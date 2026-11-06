@@ -34,9 +34,14 @@ def test_a_sweep_reader_reads_every_member(run):
     )
     assert key.parts["upstream"] == [
         [
-            "sweep:m",
+            "sweep:g.m",
             cg.canonical_json(
-                ["sweep", "m", [["big", ["provenance", "h1"]], ["small", ["provenance", "h0"]]]]
+                [
+                    "sweep",
+                    "g",
+                    "m",
+                    [["big", ["provenance", "h1"]], ["small", ["provenance", "h0"]]],
+                ]
             ),
         ]
     ]
@@ -114,7 +119,7 @@ def test_a_cell_after_a_reader_leaves_its_key_alone(run):
     later = run(*WITH_Y, "r = m", "y = 99", groups=SWEEP)
     key = alone.execution_key("c2", published=both(), env_hash=ENV)
     assert later.execution_key("c2", published=both(), env_hash=ENV) == key
-    assert [address for address, _ in key.parts["upstream"]] == ["sweep:m", "sweep:y"]
+    assert [address for address, _ in key.parts["upstream"]] == ["sweep:g.m", "sweep:g.y"]
 
 
 @pytest.mark.parametrize("tail", [(), ("y = 0",)])
@@ -464,3 +469,64 @@ def test_each_with_per_variant_is_an_error(run):
         *MEMBERS, "items = [1]", "# @each item in items\n# @per_variant\nr = m", groups=SWEEP
     )
     assert codes(analysis) == ["fanout_conflict"]
+
+
+@pytest.mark.parametrize(
+    ("annotation", "expected"),
+    [
+        ("# @seed c1 y\n", ["output:c1.y", "wired:c1.y"]),
+        ("# @after c1\n", ["output:c1.m", "output:c1.y"]),
+    ],
+)
+def test_an_instance_keys_another_variant_it_reads_from(run, annotation, expected):
+    analysis = run(*WITH_Y, f"# @per_variant\n{annotation}r = m + y", groups=SWEEP)
+    key = analysis.execution_key("c2", instance="small", published=both(), env_hash=ENV)
+    assert [a for a, _ in key.parts["upstream"] if "c1" in a] == expected
+    ref = published(
+        c0=out(m="h0", y="y0"), c1=cg.Published(cell_ref=cg.OutputRef(cg.Provenance("hc")))
+    )
+    by_ref = analysis.execution_key("c2", instance="small", published=ref, env_hash=ENV)
+    assert ["cell:c1", prov("hc")] in by_ref.parts["upstream"]
+
+
+def test_two_sweeps_making_one_name_stay_apart(run):
+    groups = cg.GroupConfig(modes={"g": "sweep", "h": "sweep"})
+    analysis = run(
+        "# @variant g a\nm = 1\ny = 1",
+        "# @variant g b\nm = 2\ny = 2",
+        "# @variant h c\nn = 1\ny = 3",
+        "# @variant h d\nn = 2\ny = 4",
+        "r = m + n",
+        groups=groups,
+    )
+    snapshot = published(
+        c0=out(m="m0", y="y0"),
+        c1=out(m="m1", y="y1"),
+        c2=out(n="n2", y="y2"),
+        c3=out(n="n3", y="y3"),
+    )
+    key = analysis.execution_key("c4", published=snapshot, env_hash=ENV)
+    parts = dict(key.parts["upstream"])
+    assert sorted(parts) == ["sweep:g.m", "sweep:g.y", "sweep:h.n", "sweep:h.y"]
+    assert parts["sweep:h.y"] == cg.canonical_json(
+        ["sweep", "h", "y", [["c", ["provenance", "y2"]], ["d", ["provenance", "y3"]]]]
+    )
+
+
+def test_a_fan_out_output_without_instances_is_an_output(run):
+    # Published once, not per instance: keyed as it is, not as an empty fan-out.
+    analysis = fanout(run)
+    snapshot = cg.Published(
+        outputs={
+            "s": cg.OutputRef(cg.Provenance("ss")),
+            "_extra": cg.OutputRef(cg.Provenance("e")),
+        },
+        instances={("s", "small"): cg.OutputRef(cg.Provenance("ss"))},
+    )
+    key = analysis.execution_key("c4", published=published(c3=snapshot), env_hash=ENV)
+    assert ["output:c3._extra", prov("e")] in key.parts["upstream"]
+    changed = cg.Published(
+        outputs={**snapshot.outputs, "_extra": cg.OutputRef(cg.Provenance("e2"))},
+        instances=snapshot.instances,
+    )
+    assert analysis.execution_key("c4", published=published(c3=changed), env_hash=ENV) != key
