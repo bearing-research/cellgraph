@@ -145,10 +145,33 @@ CASES = [
     ("class A:\n    x = 2\n    class B:\n        y = x\nx = 1", ["A", "x"], ["x"], []),
     # ... but its bases are evaluated in the enclosing class body.
     ("class A:\n    Base = object\n    class B(Base):\n        pass", ["A"], [], []),
-    # ``del x`` unbinds x; binding it again defines it again.
+    # ``del x`` unbinds x; binding it again defines it again. A ``del`` that may not
+    # run (under ``if`` or ``try``) unbinds nothing, nor one a ``global`` write follows.
     ("x = 1\ndel x", [], [], []),
     ("x = 1\ndel x\nx = 2", ["x"], [], []),
     ("del x", [], ["x"], []),
+    ("x = 1\nif reset:\n    del x", ["x"], ["reset"], []),
+    ("c = load()\ntry:\n    del c\nexcept NameError:\n    pass", ["c"], ["load"], []),
+    ("del x\ndef f():\n    global x\n    x = 2", ["f", "x"], ["x"], []),
+    # Rebinding or mutating a handler's ``e`` binds nothing past the handler.
+    ("try:\n    run()\nexcept E as e:\n    e.args = ()", [], ["E", "run"], []),
+    ("try:\n    run()\nexcept E as err:\n    err = str(err)", [], ["E", "run"], []),
+    # A star import in a handler leaves the cell's function bodies readable.
+    (
+        "try:\n    from fast import *\nexcept ImportError as e:\n    from slow import *\n"
+        "    f = lambda: e\ndef g():\n    return df",
+        ["f", "g"],
+        ["df"],
+        [],
+    ),
+    # A generator or a def parameter in a handler reads e as the handler's, or its own.
+    ("try:\n    pass\nexcept E as e:\n    g = (e for _ in r)", ["g"], ["E", "r"], []),
+    ("try:\n    pass\nexcept E as e:\n    def h(e):\n        return e + q", ["h"], ["E", "q"], []),
+    # A top-level await in a def's default or a lambda's: its bodies are still read.
+    ("def h(a=await g()):\n    return up", ["h"], ["g", "up"], []),
+    ("f = lambda a=await g(): a\ndef h():\n    return up", ["f", "h"], ["g", "up"], []),
+    # A walrus in a lambda's comprehension binds in the lambda, for the rest of it.
+    ("f = lambda: [y := i for i in r] + [y]", ["f"], ["r"], []),
     # A form feed or a line separator in the source misplaces nothing.
     ("r = await g()\n\x0c\ndef f():\n    return z", ["f", "r"], ["g", "z"], []),
     ("s = 'a\u2028b'\nawait g()\ndef f():\n    return z", ["f", "s"], ["g", "z"], []),
@@ -181,6 +204,16 @@ def test_deep_cells_on_threads_leave_the_recursion_limit_alone():
         results = list(pool.map(analyze_cell, sources))
     assert all(r.references == ["a"] for r in results)
     assert sys.getrecursionlimit() == limit
+
+
+def test_a_cell_symtable_refuses_warns_that_its_bodies_are_unread():
+    analysis = cg.analyze(
+        [cg.Cell("a", "nonlocal x\ndef f():\n    return y")], cg.Vocabulary.core()
+    )
+    assert [(d.code, d.severity) for d in analysis.diagnostics] == [
+        ("python_bodies_unread", cg.Severity.WARN)
+    ]
+    assert analysis.cells["a"].plannable
 
 
 def test_a_cell_too_deep_to_walk_is_a_diagnostic_not_a_crash(monkeypatch):

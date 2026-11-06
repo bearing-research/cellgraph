@@ -14,7 +14,10 @@
     as one at module level is the cell's.
   - A lambda's walrus binds nothing at module level.
   - `x: int` alone binds nothing, `except E as e` leaves `e` unbound, also to a
-    lambda or def in the handler, and `x = 1; del x` defines no `x`.
+    lambda or def in the handler, and rebinding or mutating `e` there defines
+    nothing. A top-level `x = 1; del x` defines no `x`.
+  - A cell whose symbol table Python refuses is the warning `python_bodies_unread`,
+    where its function bodies' reads were dropped silently.
   - A long expression is analyzed and normalized; one nested deeper than the
     analyzer can walk is the error `python_too_deep`, not a crash of `analyze`.
     The retry under a higher recursion limit starts afresh, and holds a lock, so
