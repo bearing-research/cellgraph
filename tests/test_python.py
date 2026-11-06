@@ -148,6 +148,22 @@ CASES = [
     # ``del x`` unbinds x; binding it again defines it again. A ``del`` that may not
     # run (under ``if`` or ``try``) unbinds nothing, nor one a ``global`` write follows.
     ("x = 1\ndel x", [], [], []),
+    # A class body's del unbinds as a module's does, so a later read is the module's.
+    ("class C:\n    x = 1\n    del x\n    y = x", ["C"], ["x"], []),
+    # A function's global names: an import binds one, a del alone does not.
+    ("def f():\n    global np\n    import numpy as np", ["f", "np"], [], []),
+    ("def f():\n    global x\n    del x", ["f"], [], []),
+    ("def f():\n    global x\n    x = 1\n    del x", ["f", "x"], [], []),
+    # A class-body annotation or type alias finds the class's own names first, on
+    # every Python (3.14's lazy annotations included).
+    ("class M:\n    class Inner: pass\n    inner: Inner", ["M"], [], []),
+    ("class T:\n    class Node: pass\n    def root(self) -> Node: ...", ["T"], [], []),
+    ("class C:\n    T = int\n    type A = T", ["C"], [], []),
+    ("class C:\n    inner: Outer\n    def m(self) -> Other: ...", ["C"], ["Other", "Outer"], []),
+    # A comprehension runs each if before the element: a walrus there binds first.
+    ("[y for x in a if (y := x)]", ["y"], ["a"], []),
+    ("[y := f(x) for x in a if y]", ["y"], ["a", "f", "y"], []),
+    ("[z for x in a for z in x if z]", [], ["a"], []),
     ("x = 1\ndel x\nx = 2", ["x"], [], []),
     ("del x", [], ["x"], []),
     ("x = 1\nif reset:\n    del x", ["x"], ["reset"], []),

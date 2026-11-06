@@ -259,7 +259,9 @@ class VariableAnalyzer(ast.NodeVisitor):
         body._local_vars = set(self._local_vars)
         body._in_class = True
         for stmt in node.body:
+            body._unconditional = isinstance(stmt, ast.Delete)
             body.visit(stmt)
+            body._unconditional = False
         self._local_vars = old_local_vars
         # A class body cannot see an enclosing class's names: a nested class reads globals.
         old_global = self._global_scope
@@ -479,16 +481,15 @@ class VariableAnalyzer(ast.NodeVisitor):
                 _collect_name_targets(gen.target, local_vars)
             self._local_vars = local_vars
 
-            # Element(s) and if-clauses see all loop targets.
-            for elt in elements:
-                self.visit(elt)
-            # Subsequent generators' iter expressions can see prior
-            # loop targets, so they get visited under the local scope.
-            for gen in node.generators[1:]:
-                self.visit(gen.iter)
-            for gen in node.generators:
+            # In the order they run: each generator's iter (the first's is above) and
+            # ifs, then the element, so a walrus in an if binds before the element reads.
+            for index, gen in enumerate(node.generators):
+                if index:
+                    self.visit(gen.iter)
                 for cond in gen.ifs:
                     self.visit(cond)
+            for elt in elements:
+                self.visit(elt)
         finally:
             # A walrus in a lambda's comprehension binds in the lambda, which outlives it.
             self._local_vars = old_local_vars | self._lambda_walrus
@@ -728,9 +729,14 @@ def _body_refs(tables: list[symtable.SymbolTable]) -> set[str]:
     filters builtins, privates and defines.
     """
     refs: set[str] = set()
-    stack = [child for table in tables for child in table.get_children()]
+    stack = [(child, table) for table in tables for child in table.get_children()]
     while stack:
-        scope = stack.pop()
+        scope, parent = stack.pop()
+        # An annotation or type-alias scope in a class body looks names up in the class
+        # namespace first; the class body's own walk reads those names already.
+        class_names: set[str] = set()
+        if parent.get_type() == "class" and "__classdict__" in scope.get_identifiers():
+            class_names = {sym.get_name() for sym in parent.get_symbols() if sym.is_local()}
         for sym in scope.get_symbols():
             if (
                 sym.is_referenced()
@@ -738,13 +744,16 @@ def _body_refs(tables: list[symtable.SymbolTable]) -> set[str]:
                 and not sym.is_local()
                 and not sym.is_parameter()
                 and not sym.is_free()
+                and sym.get_name() not in class_names
             ):
                 refs.add(sym.get_name())
-        stack.extend(scope.get_children())
+        stack.extend((child, scope) for child in scope.get_children())
     return refs
 
 
-def _global_writes(tables: list[symtable.SymbolTable]) -> tuple[set[str], set[str]]:
+def _global_writes(
+    tables: list[symtable.SymbolTable], tree: ast.Module
+) -> tuple[set[str], set[str]]:
     """Names a function binds at module scope through ``global X; X = ...``.
 
     Returns ``(writes, writes_with_reads)``; the second are also read in the function
@@ -752,16 +761,37 @@ def _global_writes(tables: list[symtable.SymbolTable]) -> tuple[set[str], set[st
     """
     writes: set[str] = set()
     read_writes: set[str] = set()
+    deleted_only = _deleted_only(tree)
     stack = [child for table in tables for child in table.get_children()]
     while stack:
         scope = stack.pop()
         for sym in scope.get_symbols():
-            if sym.is_assigned() and sym.is_declared_global():
+            # symtable counts a del as an assignment, and an import as neither.
+            bound = sym.is_assigned() or sym.is_imported()
+            if bound and sym.is_declared_global() and sym.get_name() not in deleted_only:
                 writes.add(sym.get_name())
                 if sym.is_referenced():
                     read_writes.add(sym.get_name())
         stack.extend(scope.get_children())
     return writes, read_writes
+
+
+def _deleted_only(tree: ast.Module) -> set[str]:
+    """Names a ``del`` removes and nothing in the cell binds."""
+    deleted: set[str] = set()
+    bound: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            (deleted if isinstance(node.ctx, ast.Del) else bound).add(node.id)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bound.add(node.name)
+        elif isinstance(node, ast.alias):
+            bound.add((node.asname or node.name).partition(".")[0])
+        elif isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)) and node.name:
+            bound.add(node.name)
+        elif isinstance(node, ast.MatchMapping) and node.rest:
+            bound.add(node.rest)
+    return deleted - bound
 
 
 def _global_augmented(tree: ast.Module) -> set[str]:
@@ -821,7 +851,7 @@ def analyze_cell(source: str) -> CellNames:
 
     # ``global`` writes inside functions are module defines too.
     # ``global_read_writes`` are also read there, so they stay in references.
-    global_writes, global_read_writes = _global_writes(tables)
+    global_writes, global_read_writes = _global_writes(tables, tree)
     augmented = _global_augmented(tree)
     global_read_writes |= augmented
     nested_refs |= augmented
