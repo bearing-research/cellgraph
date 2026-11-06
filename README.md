@@ -34,6 +34,17 @@ analysis.cells["b"].annotations["gpu"]  # 'A100'
 analysis.dag.topological_order  # ['a', 'b']
 ```
 
+## Verifying a release
+
+Each release is on PyPI with PEP 740 attestations, and on
+[GitHub Releases](https://github.com/bearing-research/cellgraph/releases) with the
+same wheel and sdist and a build provenance attestation for each:
+
+```bash
+gh release download v0.4.0 -R bearing-research/cellgraph
+gh attestation verify cellgraph-0.4.0-py3-none-any.whl -R bearing-research/cellgraph
+```
+
 ## Development
 
 ```bash

@@ -1,12 +1,17 @@
 name: Release
 
 # A `v*` tag runs CI (ci.yml: the pre-commit checks and the suite on every
-# supported Python) on the tagged commit, builds the wheel and sdist, publishes to
-# TestPyPI via OIDC trusted publishing, then to PyPI after manual approval on the
-# protected `pypi` environment.
+# supported Python and OS) on the tagged commit, builds the wheel and sdist and
+# installs each on Linux, macOS and Windows, publishes to TestPyPI via OIDC trusted
+# publishing, then to PyPI after manual approval on the protected `pypi`
+# environment, and last makes the GitHub release: the CHANGELOG section as its
+# notes, the same files as its assets, and a build provenance attestation for each.
 #
 # Trusted publishers must exist on PyPI and TestPyPI (Owner: bearing-research,
-# Repo: cellgraph, Workflow: release.yml, Environment: testpypi / pypi).
+# Repo: cellgraph, Workflow: release.yml, Environment: testpypi / pypi). PyPI gets
+# PEP 740 attestations from the publish action; the GitHub release is created as a
+# draft and published once its assets are attached, so it works with immutable
+# releases on.
 
 on:
   push:
@@ -34,6 +39,8 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
       - name: The tag, pyproject.toml and CHANGELOG.md must agree
         env:
           DISPATCH_VERSION: ${{ inputs.version }}
@@ -68,40 +75,62 @@ jobs:
     uses: ./.github/workflows/ci.yml
 
   build:
-    name: Build and smoke-test
+    name: Build
     runs-on: ubuntu-latest
     timeout-minutes: 10
     needs: checks
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
         with:
           python-version: "3.12"
           version: "latest"
+          enable-cache: false
       - run: uv build --out-dir dist
-      - name: Smoke-test the wheel
-        run: |
-          set -euo pipefail
-          WHEEL=$(ls dist/cellgraph-*-py3-none-any.whl | head -1)
-          uv venv /tmp/smoke
-          VIRTUAL_ENV=/tmp/smoke uv pip install --index https://pypi.org/simple/ "${WHEEL}"
-          /tmp/smoke/bin/python -c "
-          import cellgraph as cg
-          analysis = cg.analyze([cg.Cell('a', 'x = 1\\n'), cg.Cell('b', 'y = x + 1\\n')], cg.Vocabulary.core())
-          assert analysis.dag.topological_order == ['a', 'b'], analysis.dag.topological_order
-          print('cellgraph analyzes ok')
-          "
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: dist
           path: dist
           if-no-files-found: error
 
+  smoke:
+    name: Smoke-test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    needs: build
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        with:
+          python-version: "3.12"
+          version: "latest"
+          enable-cache: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: dist
+          path: dist
+      # Each file as a user installs it, in a fresh environment and not the checkout.
+      - name: Install and run the wheel
+        run: uv run --isolated --no-project --with dist/*.whl python .github/scripts/smoke.py
+      - name: Install and run the sdist
+        run: uv run --isolated --no-project --with dist/*.tar.gz python .github/scripts/smoke.py
+
   testpypi:
     name: Publish to TestPyPI
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    needs: build
+    needs: smoke
     environment:
       name: testpypi
       url: https://test.pypi.org/p/cellgraph
@@ -112,7 +141,7 @@ jobs:
         with:
           name: dist
           path: dist
-      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # release/v1
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # v1.14.2
         with:
           repository-url: https://test.pypi.org/legacy/
           # Lets a workflow_dispatch re-run finish after a partial failure.
@@ -135,6 +164,60 @@ jobs:
         with:
           name: dist
           path: dist
-      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # release/v1
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # v1.14.2
         with:
           skip-existing: true
+
+  # After PyPI, so a GitHub release never names a version pip cannot install.
+  github-release:
+    name: Publish the GitHub release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: pypi
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: dist
+          path: dist
+      # Verify with `gh attestation verify <file> -R bearing-research/cellgraph`.
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6  # v4.2.2
+        with:
+          subject-path: dist/*
+      - name: The release notes are the version's CHANGELOG section
+        run: |
+          python3 - <<'PY'
+          import os, re
+          version = os.environ["GITHUB_REF_NAME"].removeprefix("v")
+          text = open("CHANGELOG.md", encoding="utf-8").read()
+          heading = rf"^##\s+{re.escape(version)}(?:\s[^\n]*)?\n"
+          match = re.search(heading + r"(.*?)(?=^##\s|\Z)", text, re.M | re.S)
+          assert match, f"CHANGELOG.md has no '## {version}' section"
+          open("notes.md", "w", encoding="utf-8").write(match.group(1).strip() + "\n")
+          PY
+      # A draft takes its assets first, then is published: an immutable release
+      # accepts none once published. A re-run finishes a draft and leaves a
+      # published release alone.
+      - name: Create, fill and publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          draft=$(gh release view "$TAG" --json isDraft -q .isDraft 2>/dev/null || echo missing)
+          case "$draft" in
+            false) echo "$TAG is already published"; exit 0 ;;
+            missing)
+              gh release create "$TAG" --draft --verify-tag --title "cellgraph ${TAG#v}" \
+                --notes-file notes.md dist/* ;;
+            true) gh release upload "$TAG" dist/* --clobber ;;
+          esac
+          gh release edit "$TAG" --draft=false

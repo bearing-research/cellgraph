@@ -184,7 +184,9 @@ still gets names, edges, plannability and plan steps, and `execution_key` return
   handler too), and a top-level `del x` unbinds `x`, as Python does. Annotations
   count as reads, whatever Python cellgraph runs on, since the kernel's may
   evaluate them. A cell nested deeper than the analyzer can walk is the error
-  `python_too_deep`; one whose symbol table Python refuses (a module-level
+  `python_too_deep`. How deep that is depends on the Python: its parser recurses in
+  C, and before 3.14 Windows stops at about 3000 levels where Linux and macOS go
+  past 8000, so a long `a + a + ...` can be an error on one and not the other. One whose symbol table Python refuses (a module-level
   `nonlocal`) is the warning `python_bodies_unread`, since what its function
   bodies read is unknown.
 - `registered_analyzers()` is a copy of the registry.
