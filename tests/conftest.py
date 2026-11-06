@@ -47,3 +47,8 @@ def codes(analysis, cell_id=None):
 
 def edges(analysis):
     return sorted((e.from_cell_id, e.to_cell_id, e.variable) for e in analysis.graph.edges)
+
+
+def prov(hash_):
+    """An output filed under *hash_*, as a key component."""
+    return cg.canonical_json(["provenance", hash_])

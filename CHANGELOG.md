@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+- Execution keys count what each upstream makes, and every output component is
+  tagged (#20):
+  - An output a cell does not read is keyed as its upstream makes it, a sweep
+    member's as its variant's, not by whichever cell defines that name last. A
+    cell after a reader changed the reader's key, and a fan-out instance read
+    another variant's outputs (any it published beyond its defines, or as one cell
+    ref, too). One it seeds from or runs `@after` still counts.
+  - A sweep component is `sweep:<group>.<var>`, `["sweep", group, var, members]`,
+    so two sweeps that both make `y` no longer share one.
+  - A fan-out cell's output with no instances is an `output:`, where it was an
+    empty fan-out list that never changed.
+  - A no-cache upstream is read only for the variables the cell takes from it, so
+    one the cell reads from another producer no longer leaves the key
+    `Unavailable`.
+  - An output's component is a tagged list: `["provenance", hash]`,
+    `["nocache", hash, digest]`, `["content", digest]` or `["run", id]`.
+    `Provenance("run:r1")` and `Run("r1")` shared a component, and a content digest
+    with a `:` in it (`sha256:...`) made `execution_key` raise.
+  - `is_canonical` refuses an int of more than 640 digits, which `json` may not
+    write, so such a key field is `<key>_unencodable` where `analyze` raised. The
+    bound is fixed, so `sys.set_int_max_str_digits` does not change a key.
+  - Every output an upstream publishes still counts, read or not: a read the
+    analyzer cannot see stays covered. docs/api.md says so, and what it costs.
+
 - CI runs on Linux, macOS and Windows, and a release is also a GitHub release
   (#19):
   - The suite runs on each of Python 3.12, 3.13 and 3.14 on all three, in CI and

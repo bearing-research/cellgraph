@@ -1,7 +1,7 @@
 """The brief's scenarios over the core vocabulary (plus the test host's effects)."""
 
 import pytest
-from conftest import codes, edges
+from conftest import codes, edges, prov
 from test_keys import ENV, out, published
 
 import cellgraph as cg
@@ -33,7 +33,17 @@ def test_a_sweep_reader_reads_every_member(run):
         "c2", published=published(c0=out(m="h0"), c1=out(m="h1")), env_hash=ENV
     )
     assert key.parts["upstream"] == [
-        ["sweep:m", cg.canonical_json(["sweep", "m", [["big", "h1"], ["small", "h0"]]])]
+        [
+            "sweep:g.m",
+            cg.canonical_json(
+                [
+                    "sweep",
+                    "g",
+                    "m",
+                    [["big", ["provenance", "h1"]], ["small", ["provenance", "h0"]]],
+                ]
+            ),
+        ]
     ]
     assert key.digest == cg.parts_digest(key.parts)
 
@@ -79,7 +89,7 @@ def test_instance_keys_read_their_own_variant(run):
     upstream = published(c0=out(m="h0"), c1=out(m="h1"))
     small = analysis.execution_key("c2", instance="small", published=upstream, env_hash=ENV)
     assert small.parts["upstream"] == [
-        ["variant:c0.m@small", cg.canonical_json(["variant", "m", "small", "h0"])]
+        ["variant:c0.m@small", cg.canonical_json(["variant", "m", "small", ["provenance", "h0"]])]
     ]
     assert (small.parts["scope"], small.parts["instance"]) == ("instance", "small")
     cell = analysis.execution_key("c2", published=upstream, env_hash=ENV)
@@ -95,6 +105,41 @@ def test_instance_keys_read_their_own_variant(run):
     )
 
 
+# Members that also make y, which no reader reads.
+WITH_Y = ("# @variant g small\nm = 1\ny = 1", "# @variant g big\nm = 2\ny = 2")
+
+
+def both(**extra):
+    return published(c0=out(m="h0", y="y0", **extra), c1=out(m="h1", y="y1", **extra))
+
+
+def test_a_cell_after_a_reader_leaves_its_key_alone(run):
+    # The members' y is keyed as theirs, wherever the notebook defines y last.
+    alone = run(*WITH_Y, "r = m", groups=SWEEP)
+    later = run(*WITH_Y, "r = m", "y = 99", groups=SWEEP)
+    key = alone.execution_key("c2", published=both(), env_hash=ENV)
+    assert later.execution_key("c2", published=both(), env_hash=ENV) == key
+    assert [address for address, _ in key.parts["upstream"]] == ["sweep:g.m", "sweep:g.y"]
+
+
+@pytest.mark.parametrize("tail", [(), ("y = 0",)])
+def test_an_instance_reads_nothing_of_another_variant(run, tail):
+    analysis = run(*WITH_Y, "# @per_variant\nr = m", *tail, groups=SWEEP)
+    key = analysis.execution_key("c2", instance="small", published=both(), env_hash=ENV)
+    assert [address for address, _ in key.parts["upstream"]] == [
+        "variant:c0.m@small",
+        "variant:c0.y@small",
+    ]
+    # Nor of what that variant publishes beyond its defines, or as one cell ref.
+    extra = analysis.execution_key("c2", instance="small", published=both(_x="hx"), env_hash=ENV)
+    assert not any(
+        address.startswith(("output:c1", "variant:c1")) for address, _ in extra.parts["upstream"]
+    )
+    ref = published(c0=out(m="h0"), c1=cg.Published(cell_ref=cg.OutputRef(cg.Provenance("hc"))))
+    by_ref = analysis.execution_key("c2", instance="small", published=ref, env_hash=ENV)
+    assert not any(address == "cell:c1" for address, _ in by_ref.parts["upstream"])
+
+
 def test_a_chained_instance_reads_its_upstream_instance(run):
     analysis = fanout(run)
     snapshot = fanned("r", small="rs", big="rb")
@@ -102,7 +147,7 @@ def test_a_chained_instance_reads_its_upstream_instance(run):
         "c3", instance="big", published=published(c2=snapshot), env_hash=ENV
     )
     assert key.parts["upstream"] == [
-        ["instances:c2.r", cg.canonical_json(["variant", "r", [["big", "rb"]]])]
+        ["instances:c2.r", cg.canonical_json(["variant", "r", [["big", ["provenance", "rb"]]]])]
     ]
 
 
@@ -111,7 +156,12 @@ def test_a_plain_reader_of_a_fan_out_reads_every_instance(run):
     snapshot = fanned("s", small="ss", big="sb")
     key = analysis.execution_key("c4", published=published(c3=snapshot), env_hash=ENV)
     assert key.parts["upstream"] == [
-        ["instances:c3.s", cg.canonical_json(["fanout", "s", [["big", "sb"], ["small", "ss"]]])]
+        [
+            "instances:c3.s",
+            cg.canonical_json(
+                ["fanout", "s", [["big", ["provenance", "sb"]], ["small", ["provenance", "ss"]]]]
+            ),
+        ]
     ]
     # An instance not run yet is left out, as Strata's loader drops it.
     partial = cg.Published(
@@ -119,7 +169,7 @@ def test_a_plain_reader_of_a_fan_out_reads_every_instance(run):
     )
     key = analysis.execution_key("c4", published=published(c3=partial), env_hash=ENV)
     assert key.parts["upstream"] == [
-        ["instances:c3.s", cg.canonical_json(["fanout", "s", [["big", "sb"]]])]
+        ["instances:c3.s", cg.canonical_json(["fanout", "s", [["big", ["provenance", "sb"]]]])]
     ]
 
 
@@ -270,7 +320,7 @@ def test_an_item_key_leaves_its_source_out(run):
     assert key.parts["instance"] == "a"
     assert key.parts["upstream"] == [
         ["each:items", cg.canonical_json(["each", "a", "d1"])],
-        ["output:c1.other", "ho"],
+        ["output:c1.other", prov("ho")],
     ]
     # The rest of the collection changing does not reach this item.
     assert each_key(analysis, item, items="moved").digest == key.digest
@@ -311,14 +361,14 @@ def test_the_cell_key_covers_the_whole_source(run):
     analysis = run(*EACH)
     key = each_key(analysis, None)
     assert key.parts["scope"] == "cell"
-    assert ["output:c0.items", "hc"] in key.parts["upstream"]
+    assert ["output:c0.items", prov("hc")] in key.parts["upstream"]
     assert each_key(analysis, None, items="moved").digest != key.digest
 
 
 def test_a_reader_of_an_each_cell_sees_one_ordinary_output(run):
     analysis = run(*EACH)
     key = analysis.execution_key("c3", published=published(c2=out(r="manifest")), env_hash=ENV)
-    assert key.parts["upstream"] == [["output:c2.r", "manifest"]]
+    assert key.parts["upstream"] == [["output:c2.r", prov("manifest")]]
     assert analysis.variant_read("c3", "c2", "r") is None
 
 
@@ -419,3 +469,64 @@ def test_each_with_per_variant_is_an_error(run):
         *MEMBERS, "items = [1]", "# @each item in items\n# @per_variant\nr = m", groups=SWEEP
     )
     assert codes(analysis) == ["fanout_conflict"]
+
+
+@pytest.mark.parametrize(
+    ("annotation", "expected"),
+    [
+        ("# @seed c1 y\n", ["output:c1.y", "wired:c1.y"]),
+        ("# @after c1\n", ["output:c1.m", "output:c1.y"]),
+    ],
+)
+def test_an_instance_keys_another_variant_it_reads_from(run, annotation, expected):
+    analysis = run(*WITH_Y, f"# @per_variant\n{annotation}r = m + y", groups=SWEEP)
+    key = analysis.execution_key("c2", instance="small", published=both(), env_hash=ENV)
+    assert [a for a, _ in key.parts["upstream"] if "c1" in a] == expected
+    ref = published(
+        c0=out(m="h0", y="y0"), c1=cg.Published(cell_ref=cg.OutputRef(cg.Provenance("hc")))
+    )
+    by_ref = analysis.execution_key("c2", instance="small", published=ref, env_hash=ENV)
+    assert ["cell:c1", prov("hc")] in by_ref.parts["upstream"]
+
+
+def test_two_sweeps_making_one_name_stay_apart(run):
+    groups = cg.GroupConfig(modes={"g": "sweep", "h": "sweep"})
+    analysis = run(
+        "# @variant g a\nm = 1\ny = 1",
+        "# @variant g b\nm = 2\ny = 2",
+        "# @variant h c\nn = 1\ny = 3",
+        "# @variant h d\nn = 2\ny = 4",
+        "r = m + n",
+        groups=groups,
+    )
+    snapshot = published(
+        c0=out(m="m0", y="y0"),
+        c1=out(m="m1", y="y1"),
+        c2=out(n="n2", y="y2"),
+        c3=out(n="n3", y="y3"),
+    )
+    key = analysis.execution_key("c4", published=snapshot, env_hash=ENV)
+    parts = dict(key.parts["upstream"])
+    assert sorted(parts) == ["sweep:g.m", "sweep:g.y", "sweep:h.n", "sweep:h.y"]
+    assert parts["sweep:h.y"] == cg.canonical_json(
+        ["sweep", "h", "y", [["c", ["provenance", "y2"]], ["d", ["provenance", "y3"]]]]
+    )
+
+
+def test_a_fan_out_output_without_instances_is_an_output(run):
+    # Published once, not per instance: keyed as it is, not as an empty fan-out.
+    analysis = fanout(run)
+    snapshot = cg.Published(
+        outputs={
+            "s": cg.OutputRef(cg.Provenance("ss")),
+            "_extra": cg.OutputRef(cg.Provenance("e")),
+        },
+        instances={("s", "small"): cg.OutputRef(cg.Provenance("ss"))},
+    )
+    key = analysis.execution_key("c4", published=published(c3=snapshot), env_hash=ENV)
+    assert ["output:c3._extra", prov("e")] in key.parts["upstream"]
+    changed = cg.Published(
+        outputs={**snapshot.outputs, "_extra": cg.OutputRef(cg.Provenance("e2"))},
+        instances=snapshot.instances,
+    )
+    assert analysis.execution_key("c4", published=published(c3=changed), env_hash=ENV) != key
