@@ -243,7 +243,9 @@ The phases, each over every cell before the next:
 Cell ids must be unique; a repeated one is a `ValueError`. A cell with an error
 diagnostic is not plannable, and neither is any cell downstream of it. The
 analysis is partial, not refused: every other cell is still wired, planned and
-keyed.
+keyed. An inactive variant is in neither graph, yet `plannable` stays true, since it
+speaks only of errors: `plan` and `execution_key` raise `InactiveVariantError` for
+it, so check `dag.inactive_cells` first.
 
 `Analysis` has:
 
@@ -329,7 +331,8 @@ analysis.execution_key(cell_id, *, instance=None, published, resolve=None, env_h
   reads.
 - `resolve[kind](input) -> Resolved(identity, fingerprint)` or `Unavailable`;
   `Resolver` is that callable's type. Both values must be canonical JSON, and the
-  component is `canonical_json([kind, name, identity, fingerprint])`.
+  component is `canonical_json([kind, name, identity, fingerprint])`, which
+  `input_component(kind, name, resolved)` builds.
 - `instance` is an `Item(key, digest)` on an `@each` cell: the key is built with this
   item in place of its source, under `each:<source>` in `upstream`, so changing one
   item leaves the others' keys alone. Which items there are, and what a digest covers,
@@ -347,7 +350,7 @@ Results:
   input, or an in-key annotation missing from the fields (`field:<key>`).
 - `HostKeyed(parts, unresolved)`: for a language with `owns_key=False`. `parts`
   holds the upstream components it reads and no inputs; the host adds its own and
-  keys them with `parts_digest`. `unresolved` names the upstreams that could not
+  keys them with `parts_digest`, building each with `input_component`. `unresolved` names the upstreams that could not
   be read, as `Unavailable` would.
 
 A blocked cell is keyed too, as are the cells downstream of it: a result cached
@@ -364,7 +367,12 @@ it, so a host can pass a mapping that reads its store on demand.
 - `scope` (`cell` or `instance`), `instance`, `definition_key`, `fields`,
   `env_hash`;
 - `upstream`: `[address, component]` pairs, with addresses `output:`, `cell:`,
-  `wired:`, `variant:`, `sweep:`, `instances:` and `each:`;
+  `wired:`, `variant:`, `sweep:`, `instances:` and `each:`. An `output:` or
+  `cell:` component is the output's own, as above; the others are canonical JSON
+  lists that begin with their kind: `["wired", var, component]`,
+  `["variant", var, name, component]`, `["sweep", var, [[name, component], ...]]`,
+  `["variant" or "fanout", var, [[name, component], ...]]` under `instances:`, and
+  `["each", key, digest]`;
 - `inputs`: `[kind, name, component]`.
 
 ```

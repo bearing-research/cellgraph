@@ -78,7 +78,9 @@ def test_instance_keys_read_their_own_variant(run):
     analysis = fanout(run)
     upstream = published(c0=out(m="h0"), c1=out(m="h1"))
     small = analysis.execution_key("c2", instance="small", published=upstream, env_hash=ENV)
-    assert small.parts["upstream"] == [["variant:c0.m@small", "variant:m:small=h0"]]
+    assert small.parts["upstream"] == [
+        ["variant:c0.m@small", cg.canonical_json(["variant", "m", "small", "h0"])]
+    ]
     assert (small.parts["scope"], small.parts["instance"]) == ("instance", "small")
     cell = analysis.execution_key("c2", published=upstream, env_hash=ENV)
     assert cell.digest != small.digest
@@ -252,13 +254,24 @@ def test_an_each_cell_is_wired_to_its_source_and_binds_its_item(run):
     assert codes(analysis) == []
 
 
+def test_an_items_key_and_digest_stay_apart(run):
+    # Joined as "key=digest", these two items were one component.
+    analysis = run(*EACH)
+    one = each_key(analysis, cg.Item("a=b", "c"))
+    other = each_key(analysis, cg.Item("a", "b=c"))
+    assert one.parts["upstream"][0] != other.parts["upstream"][0]
+
+
 def test_an_item_key_leaves_its_source_out(run):
     analysis = run(*EACH)
     item = cg.Item("a", "d1")
     key = each_key(analysis, item)
     assert key.parts["scope"] == "instance"
     assert key.parts["instance"] == "a"
-    assert key.parts["upstream"] == [["each:items", "each:a=d1"], ["output:c1.other", "ho"]]
+    assert key.parts["upstream"] == [
+        ["each:items", cg.canonical_json(["each", "a", "d1"])],
+        ["output:c1.other", "ho"],
+    ]
     # The rest of the collection changing does not reach this item.
     assert each_key(analysis, item, items="moved").digest == key.digest
     # Its own content, its name and any other input do.
@@ -322,7 +335,7 @@ def test_a_bound_source_is_left_out_of_an_item_key_too():
     whole = analysis.execution_key("c0", published=published(), resolve=resolve, env_hash=ENV)
     assert isinstance(whole, cg.Keyed)
     assert whole.parts["inputs"] == [
-        ["mount", "raw", cg.canonical_json(["mount", "raw", "raw", "fp"])]
+        ["mount", "raw", cg.input_component("mount", "raw", cg.Resolved("raw", "fp"))]
     ]
 
     moved = {"mount": lambda spec: cg.Resolved(spec.name, "moved")}
@@ -332,7 +345,7 @@ def test_a_bound_source_is_left_out_of_an_item_key_too():
     )
     assert isinstance(key, cg.Keyed)
     assert key.parts["inputs"] == []
-    assert key.parts["upstream"] == [["each:raw", "each:a.csv=d1"]]
+    assert key.parts["upstream"] == [["each:raw", cg.canonical_json(["each", "a.csv", "d1"])]]
     again = analysis.execution_key(
         "c0", instance=item, published=published(), resolve=moved, env_hash=ENV
     )

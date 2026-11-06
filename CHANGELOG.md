@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Hosts build input components the way cellgraph does (#18):
+  - `input_component(kind, name, resolved)` is the component `execution_key` puts
+    in `parts["inputs"]`. A host keying a `HostKeyed` cell, or comparing saved
+    parts, builds its inputs with it.
+  - The `wired:`, `variant:` and `each:` upstream components are canonical JSON
+    lists, as `sweep:` and `instances:` are. An item's key and digest were joined
+    by `=`, so `Item("a=b", "c")` and `Item("a", "b=c")` shared a component.
+  - docs/api.md gives every upstream component's format, and says that an
+    inactive variant keeps `plannable` but is refused by `plan` and
+    `execution_key`.
+
 - The API is what `cellgraph` exports, and the docs say so (#17):
   - `Validator`, `CellEffects` and `registered_analyzers` are exported.
   - `Analysis.execution_key` and `Analysis.variant_read` have their real

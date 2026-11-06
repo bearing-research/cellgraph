@@ -71,6 +71,15 @@ def parts_digest(parts: Mapping[str, Any]) -> str:
     return _sha256(canonical_json(dict(parts)))
 
 
+def input_component(kind: str, name: str, resolved: Resolved) -> str:
+    """An input's component in ``parts["inputs"]``, as ``execution_key`` builds it.
+
+    A host keying a ``HostKeyed`` cell, or comparing saved parts, builds its inputs
+    with this.
+    """
+    return canonical_json([kind, name, resolved.identity, resolved.fingerprint])
+
+
 def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -354,14 +363,15 @@ def _upstream(
                 for name in read.variants:
                     if read.scalar:
                         assembly.add(
-                            f"variant:{upstream_id}.{var}@{name}", f"variant:{var}:{name}={value}"
+                            f"variant:{upstream_id}.{var}@{name}",
+                            canonical_json(["variant", var, name, value]),
                         )
                     else:
                         sweep_buckets.setdefault(var, []).append((name, value))
                 continue
             assembly.add(f"output:{upstream_id}.{var}", value)
             if var in shadowed and var in wired:
-                assembly.add(f"wired:{upstream_id}.{var}", f"wired:{var}={value}")
+                assembly.add(f"wired:{upstream_id}.{var}", canonical_json(["wired", var, value]))
 
     for var, pairs in sweep_buckets.items():
         members = sorted([name, value] for name, value in pairs)
@@ -421,7 +431,7 @@ def execution_key(
 
     if item is not None:
         assembly = _upstream(analysis, cell_id, None, published, without=source)
-        assembly.add(f"each:{source}", f"each:{item.key}={item.digest}")
+        assembly.add(f"each:{source}", canonical_json(["each", item.key, item.digest]))
     else:
         assembly = _upstream(analysis, cell_id, instance, published)
     inputs: list[tuple[str, str, str]] = []
@@ -437,8 +447,7 @@ def execution_key(
         if isinstance(result, Unavailable):
             assembly.unresolved.append(address)
             continue
-        component = canonical_json([spec.kind, spec.name, result.identity, result.fingerprint])
-        inputs.append((spec.kind, spec.name, component))
+        inputs.append((spec.kind, spec.name, input_component(spec.kind, spec.name, result)))
 
     # A field missing from the definition key leaves no sound key.
     assembly.unresolved.extend(f"field:{key}" for key in cell.unkeyed)
