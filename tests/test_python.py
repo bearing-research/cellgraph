@@ -160,6 +160,19 @@ CASES = [
     ("class T:\n    class Node: pass\n    def root(self) -> Node: ...", ["T"], [], []),
     ("class C:\n    T = int\n    type A = T", ["C"], [], []),
     ("class C:\n    inner: Outer\n    def m(self) -> Other: ...", ["C"], ["Other", "Outer"], []),
+    # ... and so does one nested in a type parameter scope, but not a name it deleted.
+    ("class C:\n    T = int\n    type A[U] = T", ["C"], [], []),
+    ("class C:\n    T = int\n    def f[U](self, x: T) -> T: ...", ["C"], [], []),
+    ("class C:\n    T = int\n    del T\n    type A = T", ["C"], ["T"], []),
+    ("class C:\n    T = int\n    del T\n    def f(self) -> T: ...", ["C"], ["T"], []),
+    # A del under ``global`` is weighed against bindings under ``global`` only.
+    ("def f():\n    global x\n    del x\ndef g():\n    x = 1", ["f", "g"], [], []),
+    (
+        "def f():\n    global x\n    del x\ndef g():\n    global x\n    x = 1",
+        ["f", "g", "x"],
+        [],
+        [],
+    ),
     # A comprehension runs each if before the element: a walrus there binds first.
     ("[y for x in a if (y := x)]", ["y"], ["a"], []),
     ("[y := f(x) for x in a if y]", ["y"], ["a", "f", "y"], []),

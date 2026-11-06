@@ -133,6 +133,8 @@ class VariableAnalyzer(ast.NodeVisitor):
         # A ``del`` under ``if`` or ``try`` may not run, so it unbinds nothing.
         self.deleted: set[str] = set()
         self._unconditional = False
+        # Names a class body deletes and does not bind again, in any class.
+        self.class_unbound: set[str] = set()
         # A class body's analyzer: names it reads that resolve to module globals
         # whatever the class binds (a comprehension's elements, a nested class).
         self._in_class = False
@@ -150,9 +152,13 @@ class VariableAnalyzer(ast.NodeVisitor):
             and any(alias.name == "annotations" for alias in s.names)
             for s in node.body
         )
-        for child in node.body:
-            self._unconditional = isinstance(child, ast.Delete)
-            self.visit(child)
+        self._visit_body(node.body)
+
+    def _visit_body(self, body: list[ast.stmt]) -> None:
+        """Visit a module or class body; only its own top-level ``del`` unbinds."""
+        for stmt in body:
+            self._unconditional = isinstance(stmt, ast.Delete)
+            self.visit(stmt)
             self._unconditional = False
 
     def _read(self, name: str) -> None:
@@ -258,10 +264,9 @@ class VariableAnalyzer(ast.NodeVisitor):
         body._future_annotations = self._future_annotations
         body._local_vars = set(self._local_vars)
         body._in_class = True
-        for stmt in node.body:
-            body._unconditional = isinstance(stmt, ast.Delete)
-            body.visit(stmt)
-            body._unconditional = False
+        body._visit_body(node.body)
+        # A name the class deletes is looked up past it, in the module.
+        self.class_unbound |= body.class_unbound | (body.deleted - body._defined_so_far)
         self._local_vars = old_local_vars
         # A class body cannot see an enclosing class's names: a nested class reads globals.
         old_global = self._global_scope
@@ -721,7 +726,7 @@ def _symbol_tables(source: str, tree: ast.Module) -> list[symtable.SymbolTable] 
         return None
 
 
-def _body_refs(tables: list[symtable.SymbolTable]) -> set[str]:
+def _body_refs(tables: list[symtable.SymbolTable], class_unbound: set[str]) -> set[str]:
     """Names read in function, lambda and class bodies that resolve to module globals.
 
     A symbol does iff it is referenced, ``is_global()``, and not local, a parameter
@@ -729,14 +734,25 @@ def _body_refs(tables: list[symtable.SymbolTable]) -> set[str]:
     filters builtins, privates and defines.
     """
     refs: set[str] = set()
-    stack = [(child, table) for table in tables for child in table.get_children()]
+    none: frozenset[str] = frozenset()
+    by_class: dict[int, frozenset[str]] = {}
+    stack = [(child, none) for table in tables for child in table.get_children()]
     while stack:
-        scope, parent = stack.pop()
-        # An annotation or type-alias scope in a class body looks names up in the class
-        # namespace first; the class body's own walk reads those names already.
-        class_names: set[str] = set()
-        if parent.get_type() == "class" and "__classdict__" in scope.get_identifiers():
-            class_names = {sym.get_name() for sym in parent.get_symbols() if sym.is_local()}
+        scope, inherited = stack.pop()
+        # An annotation or type-alias scope in a class body (and one nested in its type
+        # parameters) looks names up in the class namespace first; the class body's
+        # own walk reads those names already. A name the class deletes is not there.
+        class_names = none
+        if scope.get_type() == "class":
+            key = id(scope)
+            if key not in by_class:
+                local = {sym.get_name() for sym in scope.get_symbols() if sym.is_local()}
+                by_class[key] = frozenset(local - class_unbound)
+            for child in scope.get_children():
+                stack.append((child, by_class[key]))
+            inherited = none
+        elif "__classdict__" in scope.get_identifiers():
+            class_names = inherited
         for sym in scope.get_symbols():
             if (
                 sym.is_referenced()
@@ -747,7 +763,8 @@ def _body_refs(tables: list[symtable.SymbolTable]) -> set[str]:
                 and sym.get_name() not in class_names
             ):
                 refs.add(sym.get_name())
-        stack.extend((child, scope) for child in scope.get_children())
+        if scope.get_type() != "class":
+            stack.extend((child, class_names) for child in scope.get_children())
     return refs
 
 
@@ -761,14 +778,18 @@ def _global_writes(
     """
     writes: set[str] = set()
     read_writes: set[str] = set()
-    deleted_only = _deleted_only(tree)
+    deleted_only: set[str] | None = None
     stack = [child for table in tables for child in table.get_children()]
     while stack:
         scope = stack.pop()
         for sym in scope.get_symbols():
             # symtable counts a del as an assignment, and an import as neither.
             bound = sym.is_assigned() or sym.is_imported()
-            if bound and sym.is_declared_global() and sym.get_name() not in deleted_only:
+            if not (bound and sym.is_declared_global()):
+                continue
+            if deleted_only is None:
+                deleted_only = _deleted_only(tree)
+            if sym.get_name() not in deleted_only:
                 writes.add(sym.get_name())
                 if sym.is_referenced():
                     read_writes.add(sym.get_name())
@@ -777,20 +798,40 @@ def _global_writes(
 
 
 def _deleted_only(tree: ast.Module) -> set[str]:
-    """Names a ``del`` removes and nothing in the cell binds."""
+    """Names a scope declares ``global`` and deletes, that no such scope binds.
+
+    A binding in a scope without the ``global`` is that scope's own.
+    """
     deleted: set[str] = set()
     bound: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Name):
-            (deleted if isinstance(node.ctx, ast.Del) else bound).add(node.id)
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            bound.add(node.name)
-        elif isinstance(node, ast.alias):
-            bound.add((node.asname or node.name).partition(".")[0])
-        elif isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)) and node.name:
-            bound.add(node.name)
-        elif isinstance(node, ast.MatchMapping) and node.rest:
-            bound.add(node.rest)
+    scopes = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+    for scope in ast.walk(tree):
+        if not isinstance(scope, scopes):
+            continue
+        declared: set[str] = set()
+        own_deleted: set[str] = set()
+        own_bound: set[str] = set()
+        stack: list[ast.AST] = list(scope.body)
+        while stack:
+            node = stack.pop()
+            if isinstance(node, scopes):
+                own_bound.add(node.name)  # its body is its own scope
+                continue
+            if isinstance(node, ast.Lambda):
+                continue
+            if isinstance(node, ast.Global):
+                declared.update(node.names)
+            elif isinstance(node, ast.Name):
+                (own_deleted if isinstance(node.ctx, ast.Del) else own_bound).add(node.id)
+            elif isinstance(node, ast.alias):
+                own_bound.add((node.asname or node.name).partition(".")[0])
+            elif isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)) and node.name:
+                own_bound.add(node.name)
+            elif isinstance(node, ast.MatchMapping) and node.rest:
+                own_bound.add(node.rest)
+            stack.extend(ast.iter_child_nodes(node))
+        deleted |= declared & own_deleted
+        bound |= declared & own_bound
     return deleted - bound
 
 
@@ -847,7 +888,7 @@ def analyze_cell(source: str) -> CellNames:
 
     found = _symbol_tables(source, tree)
     tables = found or []
-    nested_refs = _body_refs(tables)
+    nested_refs = _body_refs(tables, analyzer.class_unbound)
 
     # ``global`` writes inside functions are module defines too.
     # ``global_read_writes`` are also read there, so they stay in references.
