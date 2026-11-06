@@ -72,6 +72,11 @@ _OFF = frozenset({"off", "false", "no", "0"})
 _FLAG_VALUES = frozenset({"", "on", "off", "true", "false", "yes", "no", "1", "0"})
 
 
+# What a converter or an encoder raises for a value it cannot take (``int("x")``, a
+# dict lookup). Anything else is a bug in it, and propagates.
+CONVERSION_ERRORS = (ValueError, TypeError, LookupError)
+
+
 def scalar(convert: Callable[[str], Any] = str) -> Parser:
     """One value; the last directive wins. An empty value or a failed ``convert`` is an error."""
 
@@ -81,7 +86,9 @@ def scalar(convert: Callable[[str], Any] = str) -> Parser:
             raise AnnotationError(f"`@{last.key}` needs a value", line=last.line)
         try:
             return convert(last.value)
-        except (TypeError, ValueError) as exc:
+        except AnnotationError:
+            raise  # the converter's own code and line
+        except CONVERSION_ERRORS as exc:
             raise AnnotationError(
                 f"`@{last.key} {last.value}` could not be read: {exc}", line=last.line
             ) from exc

@@ -358,3 +358,273 @@ def test_an_analyzer_error_string_is_still_a_syntax_error():
         analyzers={"broken": Broken()},
     )
     assert [d.code for d in analysis.diagnostics] == ["syntax_error"]
+
+
+# --- robustness ---------------------------------------------------------------
+
+
+def test_a_long_chain_is_analyzed():
+    # Cycle detection walked the graph recursively, one frame per cell.
+    n = 3000
+    cells = [cg.Cell("c0", "x0 = 1")]
+    cells += [cg.Cell(f"c{i}", f"x{i} = x{i - 1} + 1") for i in range(1, n)]
+    analysis = cg.analyze(cells, cg.Vocabulary.core())
+    assert analysis.graph.topological_order == [f"c{i}" for i in range(n)]
+    assert analysis.diagnostics == []
+
+
+def test_a_long_cycle_is_found():
+    n = 1500
+    cells = [cg.Cell("c0", f"# @after c{n - 1}\nx0 = 1")]
+    cells += [cg.Cell(f"c{i}", f"x{i} = x{i - 1} + 1") for i in range(1, n)]
+    analysis = cg.analyze(cells, cg.Vocabulary.core())
+    assert {d.code for d in analysis.diagnostics} == {"cycle"}
+    assert len(analysis.diagnostics) == n
+
+
+def test_each_cycle_is_reported_on_its_own_cells(run):
+    analysis = run("# @seed c1 b\na = b", "b = a", "# @seed c3 d\nc = d", "d = c")
+    cycle = {d.cell: d.args["cycle"] for d in analysis.diagnostics if d.code == "cycle"}
+    assert cycle == {
+        "c0": ["c0", "c1", "c0"],
+        "c1": ["c0", "c1", "c0"],
+        "c2": ["c2", "c3", "c2"],
+        "c3": ["c2", "c3", "c2"],
+    }
+
+
+def test_duplicate_cell_ids_are_refused(vocab):
+    # One cell's analysis, its errors included, would silently replace the other's.
+    cells = [cg.Cell("a", "x = ("), cg.Cell("b", "y = x"), cg.Cell("a", "x = 2")]
+    with pytest.raises(ValueError, match="'a'"):
+        cg.analyze(cells, vocab)
+
+
+def test_an_inactive_member_is_not_wired_and_has_no_plan_or_key(run):
+    analysis = run(
+        "x = 1",
+        "# @variant g a\ny = x",
+        "# @variant g b\ny = x * 2",
+        "z = y",
+        groups=cg.GroupConfig(active={"g": "a"}),
+    )
+    assert analysis.graph.inactive_cells == {"c2"}
+    # What it would read depends on the selection, so nothing is wired to or from it.
+    assert analysis.graph.cell_upstream["c2"] == analysis.graph.cell_downstream["c2"] == []
+    assert analysis.graph.cell_upstream["c3"] == ["c1"]
+    with pytest.raises(cg.InactiveVariantError, match="select it"):
+        analysis.plan("c2", ready=lambda _: False)
+    with pytest.raises(cg.InactiveVariantError):
+        analysis.execution_key("c2", published=lambda _: cg.Published(), env_hash="e" * 64)
+    # Selected, it is wired and planned like any cell.
+    selected = run(
+        "x = 1",
+        "# @variant g a\ny = x",
+        "# @variant g b\ny = x * 2",
+        groups=cg.GroupConfig(active={"g": "b"}),
+    )
+    assert selected.plan("c2", ready=lambda _: False) == ["c0", "c2"]
+    # An InactiveVariantError is a NotPlannableError, for a host that catches only that.
+    assert issubclass(cg.InactiveVariantError, cg.NotPlannableError)
+
+
+def test_a_cell_read_only_by_an_inactive_member_is_a_leaf(run):
+    analysis = run(
+        "x = 1",
+        "# @variant g a\ny = 2",
+        "# @variant g b\ny = x",
+        groups=cg.GroupConfig(active={"g": "a"}),
+    )
+    assert analysis.graph.leaves == analysis.dag.leaves == {"c0", "c1"}
+
+
+def test_a_repeated_variant_name_feeds_no_one(run):
+    analysis = run(
+        "# @variant g a\ny = 1",
+        "# @variant g b\ny = 2",
+        "# @variant g a\ny = 3",
+        "z = y",
+        groups=cg.GroupConfig(active={"g": "b"}),
+    )
+    assert "c2" in analysis.graph.inactive_cells
+    assert analysis.graph.cell_upstream["c3"] == ["c1"]
+    assert analysis.cells["c3"].plannable
+
+
+def test_a_repeated_name_in_a_sweep_reads_none_of_its_siblings(run):
+    analysis = run(
+        "x = 0",
+        "# @variant s p\nx = x + 1",
+        "# @variant s q\nx = x + 2",
+        "# @variant s p\nx = x + 3",
+        groups=cg.GroupConfig(modes={"s": "sweep"}),
+    )
+    assert analysis.graph.cell_upstream["c3"] == []
+
+
+def test_a_collision_is_on_the_line_of_the_annotation_that_made_the_member():
+    grp = cg.Vocabulary([cg.Annotation("grp", effects=lambda v: [cg.Member("g", v)])])
+    cells = [
+        cg.Cell("c0", "x = 0\n"),
+        cg.Cell("c1", "# @grp a\nx = 1"),
+        cg.Cell("c2", "# @grp a\nx = 2"),
+    ]
+    analysis = cg.analyze(cells, grp)
+    assert [(d.code, d.annotation, d.line) for d in analysis.diagnostics] == [
+        ("variant_collision", "grp", 1),
+        ("variant_collision", "grp", 1),
+    ]
+
+
+def test_a_member_conflict_joins_no_group_whatever_the_order():
+    grp = cg.Vocabulary([cg.Annotation("grp", effects=lambda v: [cg.Member("g", v)])])
+    cells = [
+        cg.Cell("c0", "# @variant g a\n# @grp b\nx = 1"),
+        cg.Cell("c1", "# @variant g b\nx = 2"),
+        cg.Cell("c2", "y = x"),
+    ]
+    results = []
+    for vocab in (cg.Vocabulary.core() | grp, grp | cg.Vocabulary.core()):
+        analysis = cg.analyze(cells, vocab)
+        assert analysis.cells["c0"].member is None
+        assert codes(analysis, "c0") == ["member_conflict"]
+        results.append((edges(analysis), {c: a.plannable for c, a in analysis.cells.items()}))
+    assert results[0] == results[1]
+    assert results[0][1]["c1"]
+
+
+def test_three_cells_sharing_a_variant_name_get_one_collision_each(run):
+    analysis = run("# @variant g a\nm = 1", "# @variant g a\nm = 2", "# @variant g a\nm = 3")
+    assert [(d.cell, d.code) for d in analysis.diagnostics] == [
+        ("c0", "variant_collision"),
+        ("c1", "variant_collision"),
+        ("c2", "variant_collision"),
+    ]
+    assert all(d.args["cells"] == ["c0", "c1", "c2"] for d in analysis.diagnostics)
+
+
+def test_a_switch_member_does_not_fan_out(run):
+    sweep = cg.GroupConfig(modes={"s": "sweep"})
+    analysis = run(
+        "# @variant s p\nx = 1",
+        "# @variant s q\nx = 2",
+        "# @variant h one\n# @per_variant\ny = x",
+        groups=sweep,
+    )
+    assert codes(analysis, "c2") == ["per_variant_on_variant_member"]
+    assert "c2" not in analysis.graph.fanout_cells
+
+
+def test_a_variant_member_is_not_an_each_cell(run):
+    analysis = run("files = []", "# @variant g a\n# @each item in files\nr = item")
+    assert codes(analysis, "c1") == ["each_on_variant_member"]
+    assert analysis.graph.each_cells == {}
+
+
+@pytest.mark.parametrize(
+    "convert", [lambda s: {"a": 1}[s], int, lambda s: s + 1], ids=["key", "value", "type"]
+)
+def test_a_converter_that_cannot_take_a_value_is_unreadable(vocab, convert):
+    vocab = vocab | cg.Vocabulary([cg.Annotation("tier", parse=cg.scalar(convert))])
+    analysis = cg.analyze([cg.Cell("c0", "# @tier b\nx = 1")], vocab)
+    assert codes(analysis) == ["tier_unreadable"]
+
+
+def test_a_converters_own_annotation_error_keeps_its_code_and_line(vocab):
+    def convert(value):
+        raise cg.AnnotationError("bad size", code="size_bad", line=2)
+
+    vocab = vocab | cg.Vocabulary([cg.Annotation("size", parse=cg.scalar(convert))])
+    analysis = cg.analyze([cg.Cell("c0", "# @size 1\n# @size 2\nx = 1")], vocab)
+    assert [(d.code, d.line) for d in analysis.diagnostics] == [("size_bad", 2)]
+
+
+def test_a_bug_in_a_converter_propagates(vocab):
+    def convert(value):
+        raise RuntimeError("a bug in the converter")
+
+    vocab = vocab | cg.Vocabulary([cg.Annotation("tier", parse=cg.scalar(convert))])
+    with pytest.raises(RuntimeError):
+        cg.analyze([cg.Cell("c0", "# @tier b\nx = 1")], vocab)
+
+
+def test_an_encoder_that_raises_is_unencodable(vocab):
+    def encode(value):
+        raise cg.AnnotationError("no encoding")
+
+    vocab = vocab | cg.Vocabulary([cg.Annotation("tier", encode=encode)])
+    analysis = cg.analyze([cg.Cell("c0", "# @tier b\nx = 1")], vocab)
+    assert [(d.code, d.line) for d in analysis.diagnostics] == [("tier_unencodable", 1)]
+    assert analysis.cells["c0"].unkeyed == ["tier"]
+
+
+def test_an_encoders_group_of_conversion_errors_is_unencodable(vocab):
+    def encode(value):
+        raise ExceptionGroup("two", [ValueError("one"), cg.AnnotationError("other")])
+
+    vocab = vocab | cg.Vocabulary([cg.Annotation("tier", encode=encode)])
+    analysis = cg.analyze([cg.Cell("c0", "# @tier b\nx = 1")], vocab)
+    assert codes(analysis) == ["tier_unencodable", "tier_unencodable"]
+
+
+def test_an_encoder_that_cannot_take_a_value_is_unencodable(vocab):
+    vocab = vocab | cg.Vocabulary([cg.Annotation("tier", encode=lambda v: {"a": 1}[v])])
+    analysis = cg.analyze([cg.Cell("c0", "# @tier b\nx = 1")], vocab)
+    assert [(d.code, d.line) for d in analysis.diagnostics] == [("tier_unencodable", 1)]
+    assert analysis.cells["c0"].unkeyed == ["tier"]
+
+
+def test_an_unreadable_error_is_named_after_its_annotation(vocab):
+    def parse(directives):
+        raise cg.AnnotationError("bad")
+
+    vocab = vocab | cg.Vocabulary([cg.Annotation("sql", parse=parse, also_reads=("connection",))])
+    analysis = cg.analyze([cg.Cell("c0", "# @connection w\n# @sql q\nx = 1")], vocab)
+    assert codes(analysis) == ["sql_unreadable"]
+
+
+def test_a_validators_diagnostic_is_the_cells():
+    def validate(value, context):
+        return [cg.Diagnostic("tier_odd", cg.Severity.ERROR, "odd", None)]
+
+    vocab = cg.Vocabulary.core() | cg.Vocabulary([cg.Annotation("tier", validate=validate)])
+    analysis = cg.analyze([cg.Cell("c0", "# @tier b\nx = 1")], vocab)
+    assert [(d.cell, d.code) for d in analysis.diagnostics] == [("c0", "tier_odd")]
+    assert analysis.blocking("c0")[0].cell == "c0"
+
+
+def test_a_conflict_is_on_the_line_of_the_annotation_that_caused_it(run):
+    bound_twice = run("files = []", "# @each item in files\n# @source item\nr = item")
+    assert [(d.code, d.annotation, d.line) for d in bound_twice.diagnostics] == [
+        ("bind_conflict", "source", 2)
+    ]
+    bound_and_read = run("# @source q\n# @ext q\nx = q")
+    assert [(d.code, d.annotation, d.line) for d in bound_and_read.diagnostics] == [
+        ("bind_read_conflict", "source", 1)
+    ]
+    reads_source = run("files = []", "# @name n\n# @each item in files\nr = len(files)")
+    assert [(d.code, d.annotation, d.line) for d in reads_source.diagnostics] == [
+        ("each_reads_source", "each", 2)
+    ]
+
+
+def test_a_hosts_after_and_fan_out_annotations_place_their_diagnostics():
+    host = cg.Vocabulary(
+        [
+            cg.Annotation(
+                "dep", parse=cg.stacked(lambda d: d.value), effects=lambda v: [cg.After(v)]
+            ),
+            cg.Annotation("foreach", effects=lambda v: [cg.FanOut(over=v)], in_key=False),
+        ]
+    )
+    analysis = cg.analyze([cg.Cell("c0", "# @dep zz\n# @foreach nothing\nr = 1")], host)
+    assert [(d.code, d.annotation, d.line) for d in analysis.diagnostics] == [
+        ("after_unknown_cell", "dep", 1),
+        ("each_unknown_source", "foreach", 2),
+    ]
+
+
+def test_a_cycle_blocks_each_of_its_cells_once_per_blocker(run):
+    analysis = run("# @after c2\na = 1", "# @after c0\nb = 1", "# @after c1\nc = 1", "d = a")
+    assert analysis.cells["c1"].blocked_by == ["c1", "c0", "c2"]
+    assert analysis.cells["c3"].blocked_by == ["c0", "c1", "c2"]

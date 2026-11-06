@@ -388,8 +388,10 @@ def execution_key(
     cell's instance is an :class:`Item`, keyed on that item in place of its source, so
     changing one item leaves every other item's key alone.
     """
-    from cellgraph.analysis import STRUCTURAL_CODES, NotPlannableError
+    from cellgraph.analysis import STRUCTURAL_CODES, InactiveVariantError, NotPlannableError
 
+    if cell_id in analysis.graph.inactive_cells:
+        raise InactiveVariantError(cell_id)  # its upstream depends on the selection
     cell = analysis.cells[cell_id]
     # A blocked cell is keyed too: a result cached under its key is still its result.
     # One a cycle or a variant collision reaches has no sound upstreams to key it on.

@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+- `analyze` survives large and odd notebooks (#16):
+  - Cycle detection no longer recurses, so a chain of thousands of cells analyzes;
+    1000 raised `RecursionError`. Blocked cells are found in one pass over the
+    strongly connected components, where a cycle's length made it cubic.
+  - Each cycle is reported on its own cells; every cycle cell had the first one.
+  - Repeated cell ids are a `ValueError`; one cell's analysis replaced the other's.
+  - `plan` and `execution_key` refuse an inactive switch member with the new
+    `InactiveVariantError`, a `NotPlannableError`: what it reads depends on the
+    selection, so a host selects it and analyzes again. Its plan left its upstream
+    out, and its key covered none of it.
+  - A cell with a member or fan-out conflict joins no group, where the last effect
+    won and so composition order decided. A variant member never fans out.
+  - Cells sharing a variant name get one `variant_collision` each, on the line of
+    the annotation that made them members. A repeat is inactive, where it shadowed
+    the active member.
+  - An unreadable annotation's default code is `<key>_unreadable` for its own key,
+    not an `also_reads` key. An encoder's `AnnotationError` is `<key>_unencodable`,
+    where it escaped `analyze`. A `scalar` converter or an encoder that raises
+    `ValueError`, `TypeError` or `LookupError` (an encoder, also in a group) is
+    unreadable or unencodable; a converter's own `AnnotationError` keeps its code
+    and line; any other exception is a bug in it, and propagates. A validator's
+    diagnostics carry the cell's id.
+  - `bind_conflict`, `bind_read_conflict`, `each_reads_source`, the variant
+    diagnostics and the `after_*`, `each_*` and `per_variant_*` ones are on the
+    line of the annotation whose effect caused them, a host's included.
+
 - The Python analyzer finds edges it missed, and drops ones it invented (#15):
   - On Python 3.14, a cell with a top-level `await`, `async for` or `async with`
     lost every name its functions and classes read, and their `global` writes.
