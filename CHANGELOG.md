@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- CI runs on Linux, macOS and Windows, and a release is also a GitHub release
+  (#19):
+  - The suite runs on each of Python 3.12, 3.13 and 3.14 on all three, in CI and
+    on the tagged commit before a release.
+  - A release installs the built wheel and sdist on all three and runs them
+    before it publishes anything.
+  - After PyPI, the release workflow makes the GitHub release: the version's
+    CHANGELOG section as its notes, the wheel and sdist as its assets, and a build
+    provenance attestation for each (`gh attestation verify`). The release is a
+    draft until its assets are attached, so it works with immutable releases.
+  - No checkout keeps its token in `.git/config`.
+
 - Hosts build input components the way cellgraph does (#18):
   - `input_component(kind, name, resolved)` is the component `execution_key` puts
     in `parts["inputs"]`. A host keying a `HostKeyed` cell, or comparing saved
