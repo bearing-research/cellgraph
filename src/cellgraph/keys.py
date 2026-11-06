@@ -1,4 +1,4 @@
-"""The definition key and the execution key (design 4.2, 4.3, 7).
+"""The definition key and the execution key.
 
 The definition key hashes the cell's language, its body without directive lines as
 the language normalizes it, and its key fields. ``execution_key`` returns ``Keyed``,
@@ -87,7 +87,7 @@ class Provenance:
 
 @dataclass(frozen=True)
 class Run:
-    """An output of a run that had no reusable key (4.3), named by the run."""
+    """An output of a run that had no reusable key, named by the run."""
 
     id: str
 
@@ -102,7 +102,7 @@ class OutputRef:
 
 @dataclass(frozen=True)
 class Published:
-    """What an upstream cell published (7.3).
+    """What an upstream cell published.
 
     - not published: the variable is absent from ``outputs``;
     - published but unreadable: present as ``Unavailable``;
@@ -173,7 +173,7 @@ class HostKeyed:
     be read; with any, the host has no sound key either.
     """
 
-    parts: dict[str, Any] | None = None
+    parts: dict[str, Any] = field(default_factory=dict)
     unresolved: tuple[str, ...] = ()
 
 

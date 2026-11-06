@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- The API is what `cellgraph` exports, and the docs say so (#17):
+  - `Validator`, `CellEffects` and `registered_analyzers` are exported.
+  - `Analysis.execution_key` and `Analysis.variant_read` have their real
+    signatures and return types, not `**kwargs` and `Any`.
+  - `HostKeyed.parts` is always a dict, never None.
+  - docs/api.md lists every code cellgraph emits with its severity and its
+    `args`, and documents `Dag.each_cells`, `VariantGroupResolution`,
+    `SweepProducer` and `Analysis.vocabulary`, `analyzers` and `groups`.
+  - A release runs CI's own jobs on the tagged commit (ci.yml is reusable), so
+    the suite runs on Python 3.12, 3.13 and 3.14 and the pre-commit checks rerun.
+    A manual re-publish must be run from the tag, so both workflows are the tag's.
+    ty is pinned, and it checks the tests too, at commit time as in CI.
+  - Grammars are equal by class, marker and directive pattern, so two packages'
+    equal `Grammar("--")` compose with `|`, where distinct objects were refused.
+
 - `analyze` survives large and odd notebooks (#16):
   - Cycle detection no longer recurses, so a chain of thousands of cells analyzes;
     1000 raised `RecursionError`. Blocked cells are found in one pass over the
@@ -62,8 +77,8 @@
     the key. A host keying a `HostKeyed` cell uses `parts_digest` too.
   - An unreadable output, a no-cache output without a content digest, and an
     in-key annotation that could not be read or encoded (`CellAnalysis.unkeyed`)
-    are `Unavailable`, where a key was built without them. `HostKeyed.unresolved` names the upstreams a host-keyed cell could not
-    read.
+    are `Unavailable`, where a key was built without them.
+    `HostKeyed.unresolved` names the upstreams a host-keyed cell could not read.
   - An instance is `scope` and `instance` in `parts`, so an `@each` item key may
     contain `:` (a path or a URI), which `derive_subkey` refused.
   - `canonical_json` takes only what the new `is_canonical` accepts, the same rule

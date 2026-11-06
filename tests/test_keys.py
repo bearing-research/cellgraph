@@ -1,6 +1,7 @@
 """Keys against the formulas written out here, not against cellgraph's helpers."""
 
 import hashlib
+import inspect
 from collections.abc import Mapping
 
 import pytest
@@ -8,6 +9,8 @@ from test_languages import Dashes, Words
 from vestigo.provenance import derive_subkey as vestigo_subkey
 
 import cellgraph as cg
+from cellgraph import analysis as analysis_module
+from cellgraph import keys
 
 ENV = "e" * 64
 PINNED_PYTHON = "9128183dbea770ce61d4daac885cf2abee76c61a706899381b13733ff2dcaba0"
@@ -291,7 +294,7 @@ def test_an_in_key_annotation_missing_from_the_fields_leaves_no_key(annotation):
 def test_strict_is_keyword_only(vocab):
     # A call written for the removed format arguments fails loudly, not as strict=True.
     with pytest.raises(TypeError):
-        cg.analyze([cg.Cell("c0", "x = 1")], vocab, None, "cellgraph-1")
+        cg.analyze([cg.Cell("c0", "x = 1")], vocab, None, "cellgraph-1")  # ty: ignore[too-many-positional-arguments]
 
 
 def test_the_shadowed_reads(run):
@@ -328,3 +331,24 @@ def test_an_output_is_looked_up_only_when_it_counts(run):
         "c1", published=published(c0=cg.Published(outputs=outputs)), env_hash=ENV
     )
     assert outputs.looked_up == ["x"]
+
+
+def _signature(fn, module):
+    """Every parameter after the first, and the return type, with annotations evaluated.
+
+    The first is ``self`` or ``analysis``, which keys.py names only to type-check.
+    """
+    sig = inspect.signature(fn)
+    names = vars(module)
+    params = list(sig.parameters.values())[1:]
+    return (
+        [(p.name, p.kind, p.default, eval(p.annotation, names)) for p in params],
+        eval(sig.return_annotation, names),
+    )
+
+
+@pytest.mark.parametrize("name", ["execution_key", "variant_read"])
+def test_an_analysis_method_takes_what_its_function_takes(name):
+    """The method restates the function's signature for its types; the two must agree."""
+    method = _signature(getattr(cg.Analysis, name), analysis_module)
+    assert method == _signature(getattr(keys, name), keys)

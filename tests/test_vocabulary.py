@@ -1,3 +1,5 @@
+import re
+
 import pytest
 from test_languages import Dashes
 
@@ -22,13 +24,16 @@ def test_composition_refuses_an_also_read_key_claimed_twice():
 def test_keys_include_also_read_keys():
     vocab = cg.Vocabulary([cg.Annotation("loop", also_reads=("loop_until",))])
     assert vocab.keys == {"loop", "loop_until"}
-    assert vocab.owner("loop_until").key == "loop"
+    owner = vocab.owner("loop_until")
+    assert owner is not None and owner.key == "loop"
 
 
 def test_hooks_compose():
     one = cg.Vocabulary([cg.Annotation("a")], cell_effects=lambda m, p: [cg.Binds("x")])
     two = cg.Vocabulary([cg.Annotation("b")], cell_effects=lambda m, p: [cg.Binds("y")])
-    assert list((one | two).cell_effects({}, {})) == [cg.Binds("x"), cg.Binds("y")]
+    both = (one | two).cell_effects
+    assert both is not None
+    assert list(both({}, {})) == [cg.Binds("x"), cg.Binds("y")]
 
 
 def test_scalar_takes_the_last_line_and_refuses_an_empty_one():
@@ -86,14 +91,26 @@ def test_grammar_for_keeps_the_vocabularys_grammar_class():
 
 
 def test_composition_keeps_a_custom_grammar():
-    custom = cg.Grammar()
+    custom = cg.Grammar("--")
     one = cg.Vocabulary([cg.Annotation("a")], grammar=custom)
     two = cg.Vocabulary([cg.Annotation("b")])
     assert (one | two).grammar is custom and (two | one).grammar is custom
     assert (one | cg.Vocabulary([cg.Annotation("c")], grammar=custom)).grammar is custom
     assert (two | cg.Vocabulary([cg.Annotation("c")])).grammar is cg.GRAMMAR
+    # An equal grammar from another package composes; a different one is refused.
+    assert (one | cg.Vocabulary([cg.Annotation("c")], grammar=cg.Grammar("--"))).grammar is custom
+    assert (two | cg.Vocabulary([cg.Annotation("c")], grammar=cg.Grammar())).grammar is cg.GRAMMAR
     with pytest.raises(ValueError, match="grammar"):
-        one | cg.Vocabulary([cg.Annotation("c")], grammar=cg.Grammar())
+        one | cg.Vocabulary([cg.Annotation("c")], grammar=cg.Grammar("//"))
+
+
+def test_grammars_are_equal_by_class_marker_and_pattern():
+    class Quarto(cg.Grammar):
+        directive_re = re.compile(r"^#\|\s*(\w+):\s*(.*?)\s*$")
+
+    assert cg.Grammar("--") == cg.Grammar("--") and hash(cg.Grammar()) == hash(cg.GRAMMAR)
+    assert cg.Grammar("--") != cg.Grammar() and Quarto() != cg.Grammar()
+    assert cg.GRAMMAR.with_marker("--") == cg.Grammar("--")
 
 
 def test_an_edit_takes_the_analyzer_itself():

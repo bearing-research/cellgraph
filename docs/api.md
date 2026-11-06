@@ -1,9 +1,10 @@
 # The cellgraph API
 
-Everything below is importable from `cellgraph`. The package runs nothing and has
-no dependencies: the host executes cells, stores their outputs and resolves their
-external inputs, and cellgraph answers what the graph is, what can be planned, and
-what each cell's key is.
+Everything below is importable from `cellgraph`, and that is the public API: the
+submodules are internal and may change without notice. The package runs nothing
+and has no dependencies: the host executes cells, stores their outputs and
+resolves their external inputs, and cellgraph answers what the graph is, what can
+be planned, and what each cell's key is.
 
 ## Cells and the grammar
 
@@ -99,11 +100,14 @@ Annotation(
   a group of them) becomes `<key>_invalid`, on the annotation's first line unless
   the error names one.
 
+`Parser`, `Validator` and `CellEffects` are the types of `parse`, `validate` and a
+vocabulary's `cell_effects`.
+
 Parsers: `scalar(convert=str)` (the last line wins; empty is an error, and so is a
 `ValueError`, `TypeError` or `LookupError` from `convert`, while anything else it
-raises is a bug and propagates), `flag()` (bare, or `on|off|true|false|yes|no|1|0`), and `stacked(item)`
-(one value per line). `mark_stacked(parse)` marks a hand-written parser as reading
-repeated lines, and `is_stacked(parse)` tells.
+raises is a bug and propagates), `flag()` (bare, or `on|off|true|false|yes|no|1|0`),
+and `stacked(item)` (one value per line). `mark_stacked(parse)` marks a hand-written
+parser as reading repeated lines, and `is_stacked(parse)` tells.
 
 ```python
 Vocabulary(annotations, cell_effects=None, grammar=GRAMMAR)
@@ -111,8 +115,9 @@ Vocabulary(annotations, cell_effects=None, grammar=GRAMMAR)
 
 - A directive key claimed twice is refused, and so is a key in both sides of
   `a | b`, so composition order never decides a result. `|` chains the two
-  `cell_effects` hooks, and keeps a custom `grammar` from either side; two
-  different custom grammars are refused.
+  `cell_effects` hooks, and keeps a custom `grammar` from either side; two that
+  differ are refused. Grammars are equal when they have the same class, marker and
+  directive pattern, so two packages' `Grammar("--")` compose.
 - `cell_effects(meta, parsed)` is called for every cell with the host's `meta` and
   the parsed value of each present annotation. It is for effects that come from
   host configuration, such as mounts declared outside the source.
@@ -182,7 +187,9 @@ still gets names, edges, plannability and plan steps, and `execution_key` return
   `python_too_deep`; one whose symbol table Python refuses (a module-level
   `nonlocal`) is the warning `python_bodies_unread`, since what its function
   bodies read is unknown.
-- `strip_lines` is the default normalizer.
+- `registered_analyzers()` is a copy of the registry.
+- `strip_lines` is a ready-made normalizer: trailing whitespace and outer blank
+  lines dropped.
 - A cell whose language has no analyzer raises `UnknownLanguageError` instead of
   silently dropping its references.
 
@@ -207,6 +214,7 @@ The phases, each over every cell before the next:
 2. **Names**:
    - `Defines`, then `Reads`, then `Binds`;
    - a bound name leaves the references;
+   - an `@each` cell that reads its source whole is `each_reads_source`;
    - the conflicts: `bind_conflict`, `bind_read_conflict`, `seed_conflict`,
      `member_conflict`, `fanout_conflict`, `input_conflict`. A cell with a member
      or fan-out conflict joins no group and fans out no way, so composition order
@@ -228,14 +236,21 @@ The phases, each over every cell before the next:
    - cycles are `cycle` on every cell on one, each with its own cycle as
      `args["cycle"]` and the message `Cycle detected in DAG: a → b → a`, the
      shortest cycle through the first of its cells.
+5. **Variant notes**: each variant member's warnings against its group and the
+   `GroupConfig`: `variant_contract_mismatch`, `variant_mode_invalid`,
+   `variant_active_redundant` and `variant_active_unknown`.
 
 Cell ids must be unique; a repeated one is a `ValueError`. A cell with an error
-diagnostic is not plannable, and neither is any cell downstream of it. The analysis is partial, not refused: every other cell is still
-wired, planned and keyed.
+diagnostic is not plannable, and neither is any cell downstream of it. The
+analysis is partial, not refused: every other cell is still wired, planned and
+keyed.
 
 `Analysis` has:
 
 - `cells`: `{id: CellAnalysis}`.
+- `vocabulary`, `analyzers` and `groups`: what the analysis was run with. The graph
+  and every definition key are computed from them in `analyze`; `execution_key`
+  looks up each cell's analyzer in `analyzers` and reads nothing else of them.
 - `graph`: the `Dag` over every active cell.
 - `dag`: the same graph restricted to plannable cells.
 - `diagnostics`, `structural_errors` (`cycle` and `variant_collision`), and
@@ -256,7 +271,7 @@ wired, planned and keyed.
 
 - `annotations` (the parsed values), `effects`, `defines`, `references`,
   `builtin_references`, `bound`, `inputs`, `nocache`;
-- `key_fields`, `diagnostics`, `plannable`, `blocked_by`;
+- `key_fields`, `unkeyed`, `diagnostics`, `plannable`, `blocked_by`;
 - `normalized` and `definition_key`, for every cell.
 
 `Dag` carries:
@@ -265,7 +280,18 @@ wired, planned and keyed.
   an ordering edge), `cell_upstream`, `cell_downstream`, `roots`, `leaves`, and
   `topological_order` (Kahn);
 - `consumed_variables`, `variable_producer`, `read_producers`, `wired_inputs`,
-  `variant_groups`, `inactive_cells`, `fanout_cells`, `shadow_warnings`.
+  `variant_groups`, `inactive_cells`, `fanout_cells`, `each_cells`,
+  `shadow_warnings`.
+- `variant_groups` is a list of `VariantGroupResolution(group, active_name,
+  active_cell_id, members, mode)`, with `members` the `(cell_id, name)` pairs in
+  source order, inactive ones included.
+- A variable a sweep or a fan-out cell makes is produced by a
+  `SweepProducer(group, variants, fanout_cell=None)`, in `variable_producer` and
+  `read_producers`: `variants` is `(name, cell_id)` pairs, all the fan-out cell's
+  when `fanout_cell` is set.
+- `fanout_cells` maps a `@per_variant` cell to its `SweepProducer`, with
+  `fanout_cell` set.
+- `each_cells` maps an `@each` cell to the name its items come from.
 
 ## Keys
 
@@ -278,9 +304,10 @@ key        = sha256(canonical_json(["definition", 1, language, normalized, field
 
 `fields` is the cell's `key_fields`; `1` is the definition key's own format, apart
 from `PARTS_SCHEMA`. An in-key annotation that is present but could not be read or
-encoded is listed in the cell's `unkeyed`, and its execution key is `Unavailable`. Comments other than directives stay in the
-body for the normalizer to judge; Python's drops them in its AST round trip. The
-language is in the key: the same text in two languages is two programs.
+encoded is listed in the cell's `unkeyed`, and its execution key is `Unavailable`.
+Comments other than directives stay in the body for the normalizer to judge;
+Python's drops them in its AST round trip. The language is in the key: the same
+text in two languages is two programs.
 
 ### Execution key
 
@@ -373,14 +400,47 @@ inputs that exist only after its upstream runs.
 
 ## Diagnostics
 
-`Diagnostic(code, severity, message, cell, annotation=None, line=None, args={})`,
-with `Severity.ERROR`, `WARN` or `INFO`. Only an error blocks planning.
+`Diagnostic(code, severity, message, cell=None, annotation=None, line=None, args={})`,
+with `Severity.ERROR`, `WARN` or `INFO`. Only an error blocks planning. `args`
+holds what cellgraph built the message from, so a host can word its own; it does
+not count in equality.
 
-`args` holds what cellgraph built the message from, so a host can word its own:
-the `key` and `suggestion` of `annotation_unknown`, the `cell_id` an `after_*`
-names, the `name`, `cell_id` and `reason` (`unknown`, `self`, `inactive` or
-`undefined`) of `seed_unknown_cell`, the `group` and the names of the variant and
-fan-out checks, and the `cycle` of a cycle. It does not count in equality.
+| Code | Severity | `args` |
+| ---- | -------- | ------ |
+| `annotation_unknown` | warn, or error with `strict=True` | `key`, `suggestion` |
+| `<key>_unreadable` | error | |
+| `<key>_unencodable` | error | `type`, when the value is not canonical |
+| `<key>_invalid` | error | |
+| `variant_malformed`, `each_malformed` | error | |
+| `syntax_error` | error | |
+| `bind_conflict`, `bind_read_conflict`, `seed_conflict` | error | `name` |
+| `input_conflict` | error | `kind`, `name` |
+| `member_conflict`, `fanout_conflict` | error | |
+| `each_reads_source` | error | `source` |
+| `variant_collision` | error | `group`, `name`, `cells` |
+| `variant_contract_mismatch` | warn | `group`, `name`, `defines`, `sibling`, `sibling_defines` |
+| `variant_mode_invalid` | warn | `group`, `mode` |
+| `variant_active_redundant` | info | `group`, `active` |
+| `variant_active_unknown` | warn | `group`, `active` |
+| `seed_unknown_cell` | error | `name`, `cell_id`, `reason` (`unknown`, `self`, `inactive` or `undefined`) |
+| `after_self` | warn | `cell_id` |
+| `after_unknown_cell`, `after_inactive_variant` | error | `cell_id` |
+| `each_on_variant_member` | error | |
+| `each_over_sweep`, `each_unknown_source` | error | `source` |
+| `per_variant_on_variant_member`, `per_variant_no_sweep_source` | warn | |
+| `per_variant_unknown_group` | warn | `group` |
+| `per_variant_ambiguous_group` | warn | `groups` |
+| `per_variant_group_of_one` | info | `group` |
+| `cycle` | error | `cycle` |
+| `python_too_deep` (the Python analyzer) | error | |
+| `python_bodies_unread` (the Python analyzer) | warn | |
+
+These are cellgraph's codes. `<key>` is the annotation's key; a parser, encoder or
+validator may raise an `AnnotationError` with its own code instead, as
+`variant_malformed` and `each_malformed` do. A validator may also return
+diagnostics of any code and severity, and a language analyzer add its own through
+`Analyzed.diagnostics` (see Languages), so a host's table of codes has room for
+those of its own vocabulary and analyzers.
 
 An `@after` problem is on the first `@after` line that names the id. A conflict or
 seed error is on the first line of the annotation whose effect caused it.

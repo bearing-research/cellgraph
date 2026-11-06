@@ -16,7 +16,7 @@ repos:
         entry: uv run --frozen ty check
         language: system
         pass_filenames: false
-        files: ^(src/.*\.py|pyproject\.toml)$
+        files: ^((src|tests)/.*\.py|pyproject\.toml)$
       - id: uv-lock
         name: uv lock --check
         entry: uv lock --check

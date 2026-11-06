@@ -1,8 +1,9 @@
 name: Release
 
-# A `v*` tag runs the suite, builds the wheel and sdist, publishes to TestPyPI via OIDC
-# trusted publishing, then to PyPI after manual approval on the protected
-# `pypi` environment.
+# A `v*` tag runs CI (ci.yml: the pre-commit checks and the suite on every
+# supported Python) on the tagged commit, builds the wheel and sdist, publishes to
+# TestPyPI via OIDC trusted publishing, then to PyPI after manual approval on the
+# protected `pypi` environment.
 #
 # Trusted publishers must exist on PyPI and TestPyPI (Owner: bearing-research,
 # Repo: cellgraph, Workflow: release.yml, Environment: testpypi / pypi).
@@ -11,11 +12,12 @@ on:
   push:
     tags:
       - 'v*'
-  # Re-publish without re-tagging after a transient publish failure.
+  # Re-publish without re-tagging after a transient publish failure. Run it from the
+  # tag ("Use workflow from: v0.1.0"), so this file and ci.yml are the tag's too.
   workflow_dispatch:
     inputs:
       version:
-        description: "Version without the leading v (e.g. 0.1.0). Required on manual runs."
+        description: "Version without the leading v (e.g. 0.1.0); must match the tag run from."
         required: true
         type: string
 
@@ -32,8 +34,6 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.ref }}
       - name: The tag, pyproject.toml and CHANGELOG.md must agree
         env:
           DISPATCH_VERSION: ${{ inputs.version }}
@@ -41,10 +41,13 @@ jobs:
         run: |
           python3 - <<'PY'
           import os, re, sys, tomllib
-          if os.environ["EVENT_NAME"] == "workflow_dispatch":
-              version = os.environ["DISPATCH_VERSION"]
-          else:
-              version = os.environ["GITHUB_REF_NAME"].lstrip("v")
+          if not os.environ["GITHUB_REF"].startswith("refs/tags/v"):
+              print(f"::error::run from a v* tag, not {os.environ['GITHUB_REF']}")
+              sys.exit(1)
+          version = os.environ["GITHUB_REF_NAME"].removeprefix("v")
+          if os.environ["EVENT_NAME"] == "workflow_dispatch" and os.environ["DISPATCH_VERSION"] != version:
+              print(f"::error::version {os.environ['DISPATCH_VERSION']!r} is not the tag's {version!r}")
+              sys.exit(1)
           with open("pyproject.toml", "rb") as f:
               declared = tomllib.load(f)["project"]["version"]
           if declared != version:
@@ -57,32 +60,20 @@ jobs:
           print(f"releasing {version}")
           PY
 
-  # The tag publishes only what passes the suite, whatever CI said about the commit.
-  test:
-    name: Test the tagged commit
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+  # The tag publishes only what passes CI's own jobs on the tagged commit, whatever
+  # CI said about the commit before.
+  checks:
+    name: CI on the tagged commit
     needs: preflight
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.ref }}
-      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
-        with:
-          python-version: "3.12"
-          version: "latest"
-      - run: uv sync --locked
-      - run: uv run pytest -q -p no:cacheprovider
+    uses: ./.github/workflows/ci.yml
 
   build:
     name: Build and smoke-test
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    needs: test
+    needs: checks
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.ref }}
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
         with:
           python-version: "3.12"

@@ -5,6 +5,9 @@ language whose comment marker is ``--``. ``analyze`` reads each cell's names and
 annotations, applies the annotations' effects, wires the DAG, and keys every cell;
 ``Analysis.execution_key`` and ``Analysis.plan`` answer the two questions a host
 asks before running one.
+
+The public API is what this package exports, listed in ``__all__`` and described in
+docs/api.md. Its submodules are internal and may change without notice.
 """
 
 from cellgraph.analysis import (
@@ -61,15 +64,18 @@ from cellgraph.languages import (
     directive_keys,
     get_language_analyzer,
     register_language_analyzer,
+    registered_analyzers,
     strip_lines,
 )
 from cellgraph.python import PythonAnalyzer
 from cellgraph.vocabulary import (
     Annotation,
     AnnotationError,
+    CellEffects,
     Parser,
     Partial,
     ValidationContext,
+    Validator,
     Vocabulary,
     flag,
     is_stacked,
@@ -91,6 +97,7 @@ __all__ = [
     "Binds",
     "Cell",
     "CellAnalysis",
+    "CellEffects",
     "Dag",
     "DagEdge",
     "Defines",
@@ -111,10 +118,10 @@ __all__ = [
     "NoCache",
     "NotPlannableError",
     "OutputRef",
-    "Provenance",
-    "Published",
     "Parser",
     "Partial",
+    "Provenance",
+    "Published",
     "PythonAnalyzer",
     "Reads",
     "Resolved",
@@ -124,10 +131,11 @@ __all__ = [
     "Severity",
     "SweepProducer",
     "Unavailable",
-    "VariantRead",
     "UnknownLanguageError",
     "ValidationContext",
+    "Validator",
     "VariantGroupResolution",
+    "VariantRead",
     "Vocabulary",
     "analyze",
     "canonical_json",
@@ -141,6 +149,7 @@ __all__ = [
     "mark_stacked",
     "parts_digest",
     "register_language_analyzer",
+    "registered_analyzers",
     "scalar",
     "stacked",
     "strip_lines",

@@ -1,11 +1,12 @@
-"""Cell analysis and the DAG (design 4.4 and 4.5).
+"""Cell analysis and the DAG.
 
-``analyze`` runs the phases in a fixed order: parse, names, groups, wiring,
-outputs, keys. It always returns an analysis an editor can show. A cell carries
-``plannable``, which is false for its own errors, for a structural error it is
-part of (a cycle, a variant collision) and for any cell it depends on that is not
-plannable. ``Analysis.graph`` holds every candidate edge; ``Analysis.dag`` keeps
-only plannable cells.
+``analyze`` runs the phases in a fixed order: parse, names, validate, wire, variant
+notes; then it marks what is plannable and computes every definition key. It always returns
+an analysis an editor can show. A cell carries ``plannable``, which is false for
+its own errors, for a structural error it is part of (a cycle, a variant
+collision) and for any cell it depends on that is not plannable.
+``Analysis.graph`` holds every candidate edge; ``Analysis.dag`` keeps only
+plannable cells.
 
 The wiring is Strata's ``NotebookDag.from_cells``, ported as is.
 """
@@ -19,6 +20,10 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+# keys and plan import this module inside their functions (and to type-check), not at
+# module level, which is what keeps importing them here from being a cycle.
+from cellgraph import keys as _keys
+from cellgraph import plan as _plan
 from cellgraph.diagnostics import Diagnostic, Severity
 from cellgraph.effects import (
     EFFECT_TYPES,
@@ -35,10 +40,10 @@ from cellgraph.effects import (
     Seeds,
 )
 from cellgraph.grammar import Directive
-from cellgraph.keys import is_canonical
 from cellgraph.languages import (
     Analyzed,
     LanguageAnalyzer,
+    UnknownLanguageError,
     directive_keys,
     registered_analyzers,
 )
@@ -511,7 +516,7 @@ def _encode(ca: CellAnalysis, annotation: Annotation, value: Any, line: int) -> 
     except CONVERSION_ERRORS as raised:
         errors = [AnnotationError(f"`@{key}` could not be encoded: {raised}")]
     else:
-        if is_canonical(encoded):
+        if _keys.is_canonical(encoded):
             ca.key_fields[key] = encoded
             return
         name = type(encoded).__name__
@@ -678,7 +683,7 @@ def _names_phase(ca: CellAnalysis, analyzed: Analyzed) -> None:
 def _resolve_groups(
     cells: list[CellAnalysis], groups: GroupConfig
 ) -> tuple[list[VariantGroupResolution], set[str]]:
-    """Phase 3: each variant group's members and its active one; collisions are errors."""
+    """Part of phase 4: each variant group's members and its active one; collisions are errors."""
     sweep = {g for g, m in groups.modes.items() if m == "sweep"}
     grouped: dict[str, list[tuple[str, str]]] = {}
     group_order: list[str] = []
@@ -1143,31 +1148,38 @@ class Analysis:
             if d.severity == Severity.ERROR
         ]
 
-    def execution_key(self, cell_id: str, **kwargs: Any) -> Any:
+    def execution_key(
+        self,
+        cell_id: str,
+        *,
+        instance: str | _keys.Item | None = None,
+        published: Callable[[str], _keys.Published],
+        resolve: Mapping[str, _keys.Resolver] | None = None,
+        env_hash: str,
+    ) -> _keys.Keyed | _keys.Unavailable | _keys.HostKeyed:
         """See ``cellgraph.keys.execution_key``."""
-        from cellgraph.keys import execution_key
-
-        return execution_key(self, cell_id, **kwargs)
+        return _keys.execution_key(
+            self,
+            cell_id,
+            instance=instance,
+            published=published,
+            resolve=resolve,
+            env_hash=env_hash,
+        )
 
     def variant_read(
         self, cell_id: str, upstream_id: str, var: str, instance: str | None = None
-    ) -> Any:
+    ) -> _keys.VariantRead | None:
         """See ``cellgraph.keys.variant_read``."""
-        from cellgraph.keys import variant_read
-
-        return variant_read(self, cell_id, upstream_id, var, instance)
+        return _keys.variant_read(self, cell_id, upstream_id, var, instance)
 
     def shadowed_reads(self, cell_id: str) -> set[str]:
         """See ``cellgraph.keys.shadowed_reads``."""
-        from cellgraph.keys import shadowed_reads
-
-        return shadowed_reads(self, cell_id)
+        return _keys.shadowed_reads(self, cell_id)
 
     def plan(self, target: str, ready: Callable[[str], bool]) -> list[str]:
         """See ``cellgraph.plan.plan``."""
-        from cellgraph.plan import plan
-
-        return plan(self, target, ready)
+        return _plan.plan(self, target, ready)
 
 
 def analyze(
@@ -1185,8 +1197,6 @@ def analyze(
     ``context`` is passed to every validator as ``ValidationContext.host``. With
     ``strict=True`` an unknown directive key is an error rather than a warning.
     """
-    from cellgraph.keys import definition_key
-
     table = dict(analyzers) if analyzers is not None else registered_analyzers()
     groups = groups or GroupConfig()
     cell_list = list(cells)
@@ -1198,8 +1208,6 @@ def analyze(
     analyses: list[CellAnalysis] = []
     for cell in cell_list:
         if cell.language not in table:
-            from cellgraph.languages import UnknownLanguageError
-
             raise UnknownLanguageError(f"no language analyzer for {cell.language!r}")
         ca, analyzed = _parse_phase(cell, vocabulary, table[cell.language], strict)
         _names_phase(ca, analyzed)
@@ -1259,5 +1267,5 @@ def analyze(
         groups=groups,
     )
     for ca in analyses:
-        ca.normalized, ca.definition_key = definition_key(analysis, ca)
+        ca.normalized, ca.definition_key = _keys.definition_key(analysis, ca)
     return analysis

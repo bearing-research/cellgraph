@@ -15,6 +15,7 @@ def test_an_input_spec_does_not_decide_its_identity():
 
 
 def test_an_effect_outside_the_ten_is_refused():
-    vocab = cg.Vocabulary([cg.Annotation("bad", effects=lambda v: ["not an effect"])])
+    bad = cg.Annotation("bad", effects=lambda v: ["not an effect"])  # ty: ignore[invalid-argument-type]
+    vocab = cg.Vocabulary([bad])
     with pytest.raises(TypeError, match="ten effects"):
         cg.analyze([cg.Cell("a", "# @bad 1\nx = 1")], vocab)
