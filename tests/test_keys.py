@@ -201,7 +201,7 @@ def test_a_shadowed_name_adds_its_wired_producer(run):
     analysis = run("x = 1\nz = 1", "x = 2", "y = x + z")
     snapshot = published(c0=out(x="h0", z="hz"), c1=out(x="h1"))
     key = analysis.execution_key("c2", published=snapshot, env_hash=ENV)
-    assert ["wired:c1.x", "wired:x=h1"] in key.parts["upstream"]
+    assert ["wired:c1.x", cg.canonical_json(["wired", "x", "h1"])] in key.parts["upstream"]
     assert not any(address.startswith("wired:c0") for address, _ in key.parts["upstream"])
 
 
@@ -220,6 +220,7 @@ def test_an_input_is_its_kind_name_identity_and_fingerprint(run):
 
     component = cg.canonical_json(["file", "data", {"uri": "u"}, "fp"])
     assert key("fp").parts["inputs"] == [["file", "data", component]]
+    assert cg.input_component("file", "data", cg.Resolved({"uri": "u"}, "fp")) == component
     assert key("fp").digest == cg.parts_digest(key("fp").parts)
     assert key("other").digest != key("fp").digest
     with pytest.raises(TypeError, match="not a canonical JSON value"):
