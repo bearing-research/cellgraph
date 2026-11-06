@@ -18,10 +18,13 @@ def plan(analysis: Analysis, target: str, ready: Callable[[str], bool]) -> list[
     """The upstream-reachable cells that are not ready, in topological order, then *target*.
 
     Ordering edges count as dependencies; a fan-out cell is one step. A target that
-    is not plannable raises ``NotPlannableError`` with the diagnostics that block it.
+    is not plannable raises ``NotPlannableError`` with the diagnostics that block it,
+    and an inactive variant ``InactiveVariantError``.
     """
-    from cellgraph.analysis import NotPlannableError
+    from cellgraph.analysis import InactiveVariantError, NotPlannableError
 
+    if target in analysis.graph.inactive_cells:
+        raise InactiveVariantError(target)
     if not analysis.cells[target].plannable:
         raise NotPlannableError(target, analysis.blocking(target))
     dag = analysis.dag

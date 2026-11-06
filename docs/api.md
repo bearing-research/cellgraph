@@ -92,14 +92,16 @@ Annotation(
 - `in_key`: a present annotation adds the field `key` to the definition key, with
   the value `encode(value)`, or `value` itself when that is canonical (None, bool,
   int, finite float, str, and lists and str-keyed dicts of these). A value that is
-  not canonical is the error `<key>_unencodable`.
+  not canonical is the error `<key>_unencodable`, and so is an `AnnotationError`,
+  `ValueError`, `TypeError` or `LookupError` from `encode`.
 - `validate(value, ValidationContext(cell, defines, references, host))` returns
   diagnostics. It runs after names are known; an `AnnotationError` it raises (or
   a group of them) becomes `<key>_invalid`, on the annotation's first line unless
   the error names one.
 
-Parsers: `scalar(convert=str)` (the last line wins; empty or unconvertible is an
-error), `flag()` (bare, or `on|off|true|false|yes|no|1|0`), and `stacked(item)`
+Parsers: `scalar(convert=str)` (the last line wins; empty is an error, and so is a
+`ValueError`, `TypeError` or `LookupError` from `convert`, while anything else it
+raises is a bug and propagates), `flag()` (bare, or `on|off|true|false|yes|no|1|0`), and `stacked(item)`
 (one value per line). `mark_stacked(parse)` marks a hand-written parser as reading
 repeated lines, and `is_stacked(parse)` tells.
 
@@ -206,20 +208,29 @@ The phases, each over every cell before the next:
    - `Defines`, then `Reads`, then `Binds`;
    - a bound name leaves the references;
    - the conflicts: `bind_conflict`, `bind_read_conflict`, `seed_conflict`,
-     `member_conflict`, `fanout_conflict`, `input_conflict`.
+     `member_conflict`, `fanout_conflict`, `input_conflict`. A cell with a member
+     or fan-out conflict joins no group and fans out no way, so composition order
+     never picks a side.
 3. **Validate**: each annotation's validator.
 4. **Wire**:
-   - variant groups are resolved (a name used twice in one group is
-     `variant_collision` on both cells), and an inactive switch member is left out;
-   - every reference goes to its latest earlier producer, or to every member of a
-     sweep;
+   - variant groups are resolved: cells sharing a name in one group are each
+     `variant_collision`, once, naming them all, and a repeat after the first is
+     inactive. An inactive switch member is not wired or checked against the
+     graph: what it would read depends on the selection, so `plan` and
+     `execution_key` refuse it with `InactiveVariantError` (a `NotPlannableError`),
+     and a host selects it and analyzes again;
+   - every reference goes to its latest earlier producer. A sweep produces as a
+     whole: a reader of its variable reads every member, a member after the reader
+     included, so a later member that reads the reader is a `cycle`;
    - seeds, `after` (`after_self`, `after_unknown_cell`, `after_inactive_variant`)
-     and fan-outs (`per_variant_*`, `each_*`) are applied;
-   - cycles are `cycle` on every cell on one, with the message
-     `Cycle detected in DAG: a → b → a`.
+     and fan-outs (`per_variant_*`, `each_*`) are applied; a variant member never
+     fans out;
+   - cycles are `cycle` on every cell on one, each with its own cycle as
+     `args["cycle"]` and the message `Cycle detected in DAG: a → b → a`, the
+     shortest cycle through the first of its cells.
 
-A cell with an error diagnostic is not plannable, and neither is any cell
-downstream of it. The analysis is partial, not refused: every other cell is still
+Cell ids must be unique; a repeated one is a `ValueError`. A cell with an error
+diagnostic is not plannable, and neither is any cell downstream of it. The analysis is partial, not refused: every other cell is still
 wired, planned and keyed.
 
 `Analysis` has:
@@ -315,7 +326,8 @@ Results:
 A blocked cell is keyed too, as are the cells downstream of it: a result cached
 under its key is still its result, and whether it may run is `plannable`. A cell a
 cycle or variant collision reaches (on it or upstream) raises
-`NotPlannableError(cell_id, diagnostics)` with those structural diagnostics.
+`NotPlannableError(cell_id, diagnostics)` with those structural diagnostics, and
+an inactive variant `InactiveVariantError(cell_id)`.
 
 `outputs` is read lazily: a variable's ref is looked up only when the key counts
 it, so a host can pass a mapping that reads its store on demand.
@@ -353,7 +365,8 @@ analysis.plan(target, ready) -> list[str]
 The plan is the cells upstream-reachable from `target` in the plannable DAG that
 `ready(cell_id)` says are not ready, in topological order, followed by `target`.
 Ordering edges count as dependencies, and a fan-out cell is one step. A target that
-is not plannable raises `NotPlannableError(cell_id, diagnostics)`.
+is not plannable raises `NotPlannableError(cell_id, diagnostics)`, and an inactive
+variant `InactiveVariantError(cell_id)`, with no diagnostics.
 
 The plan asks for readiness, not keys: a downstream key can depend on bytes and
 inputs that exist only after its upstream runs.

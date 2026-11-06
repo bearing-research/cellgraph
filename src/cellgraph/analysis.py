@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import ast
 import difflib
-from collections import deque
+from collections import Counter, deque
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -42,7 +42,14 @@ from cellgraph.languages import (
     directive_keys,
     registered_analyzers,
 )
-from cellgraph.vocabulary import AnnotationError, Partial, ValidationContext, Vocabulary
+from cellgraph.vocabulary import (
+    CONVERSION_ERRORS,
+    Annotation,
+    AnnotationError,
+    Partial,
+    ValidationContext,
+    Vocabulary,
+)
 
 # Diagnostics that make a structural error: the cell is on a cycle or in a collision.
 STRUCTURAL_CODES = frozenset({"cycle", "variant_collision"})
@@ -74,6 +81,21 @@ class NotPlannableError(ValueError):
         super().__init__(f"cell {cell_id} is not plannable ({reasons})")
         self.cell_id = cell_id
         self.diagnostics = list(diagnostics)
+
+
+class InactiveVariantError(NotPlannableError):
+    """A key or a plan was asked of an inactive switch member (or a repeated variant).
+
+    What it reads depends on the selection: the cells between it and its upstream are
+    wired for the active variant. A host selects it and analyzes again.
+    """
+
+    def __init__(self, cell_id: str):
+        ValueError.__init__(
+            self, f"cell {cell_id} is an inactive variant; select it and analyze again"
+        )
+        self.cell_id = cell_id
+        self.diagnostics = []
 
 
 # --- the DAG ----------------------------------------------------------------------
@@ -185,67 +207,73 @@ def _kahn(dag: Dag, cell_ids: list[str]) -> list[str]:
     return order
 
 
-def _cycles(dag: Dag, cell_ids: list[str]) -> list[list[str]]:
-    """Every cycle the depth-first walk finds, each as the ids along it (Strata's order)."""
-    color = {cid: 0 for cid in cell_ids}
-    cycles: list[list[str]] = []
+def _strong_components(dag: Dag, cell_ids: list[str]) -> list[list[str]]:
+    """The strongly connected components, downstream ones first (Tarjan, without recursion).
 
-    def dfs(node: str, path: list[str]) -> None:
-        color[node] = 1
-        path.append(node)
-        for downstream in dag.cell_downstream[node]:
-            if color.get(downstream) == 1:
-                start = path.index(downstream)
-                cycles.append(path[start:] + [downstream])
-            elif color.get(downstream) == 0:
-                dfs(downstream, path)
-        path.pop()
-        color[node] = 2
-
-    for cid in cell_ids:
-        if color[cid] == 0:
-            dfs(cid, [])
-    return cycles
-
-
-def _on_cycles(dag: Dag, cell_ids: list[str]) -> set[str]:
-    """The cells in a strongly connected component of more than one cell."""
+    A notebook can be thousands of cells long, past any recursion limit.
+    """
+    members = set(cell_ids)
+    successors = {v: [w for w in dag.cell_downstream[v] if w in members] for v in cell_ids}
     index: dict[str, int] = {}
     low: dict[str, int] = {}
     stack: list[str] = []
     on_stack: set[str] = set()
-    found: set[str] = set()
-    counter = [0]
-    members = set(cell_ids)
+    found: list[list[str]] = []
 
-    def strong(v: str) -> None:
-        index[v] = low[v] = counter[0]
-        counter[0] += 1
+    def enter(v: str) -> None:
+        index[v] = low[v] = len(index)
         stack.append(v)
         on_stack.add(v)
-        for w in dag.cell_downstream[v]:
-            if w not in members:
-                continue
-            if w not in index:
-                strong(w)
-                low[v] = min(low[v], low[w])
-            elif w in on_stack:
-                low[v] = min(low[v], index[w])
-        if low[v] == index[v]:
-            component = []
-            while True:
-                w = stack.pop()
-                on_stack.discard(w)
-                component.append(w)
-                if w == v:
-                    break
-            if len(component) > 1:
-                found.update(component)
 
-    for cid in cell_ids:
-        if cid not in index:
-            strong(cid)
+    for root in cell_ids:
+        if root in index:
+            continue
+        enter(root)
+        work = [(root, 0)]
+        while work:
+            v, i = work[-1]
+            if i < len(successors[v]):
+                work[-1] = (v, i + 1)
+                w = successors[v][i]
+                if w not in index:
+                    enter(w)
+                    work.append((w, 0))
+                elif w in on_stack:
+                    low[v] = min(low[v], index[w])
+                continue
+            work.pop()
+            if work:
+                parent = work[-1][0]
+                low[parent] = min(low[parent], low[v])
+            if low[v] == index[v]:
+                component = []
+                while True:
+                    w = stack.pop()
+                    on_stack.discard(w)
+                    component.append(w)
+                    if w == v:
+                        break
+                found.append(component)
     return found
+
+
+def _cycle_through(dag: Dag, component: list[str], start: str) -> list[str]:
+    """The shortest cycle from *start* back to it inside *component*, as ids along it."""
+    inside = set(component)
+    parent: dict[str, str | None] = {start: None}
+    queue: deque[str] = deque([start])
+    while queue:
+        v = queue.popleft()
+        for w in dag.cell_downstream[v]:
+            if w == start:
+                path = [v]
+                while (up := parent[path[-1]]) is not None:
+                    path.append(up)
+                return [*reversed(path), start]
+            if w in inside and w not in parent:
+                parent[w] = v
+                queue.append(w)
+    raise AssertionError("a strongly connected component has a cycle through each cell")
 
 
 def _wire(dag: Dag, from_id: str, to_id: str, var: str) -> None:
@@ -282,8 +310,11 @@ class CellAnalysis:
     after: list[str] = field(default_factory=list)
     seeds: dict[str, str] = field(default_factory=dict)
     seed_origins: dict[str, tuple[str | None, int | None]] = field(default_factory=dict)
+    # The annotation that ordered each ``after`` id, and the one that made ``fanout``.
+    after_origins: dict[str, str | None] = field(default_factory=dict)
     member: Member | None = None
     fanout: FanOut | None = None
+    fanout_origin: tuple[str | None, int | None] = (None, None)
     kept: list[str] = field(default_factory=list)
     inputs: list[Input] = field(default_factory=list)
     nocache: bool = False
@@ -331,25 +362,41 @@ class CellAnalysis:
         return any(d.severity == Severity.ERROR for d in self.diagnostics)
 
 
-def _annotation_errors(exc: AnnotationError | ExceptionGroup) -> list[AnnotationError]:
-    """The errors a parser or validator raised: one, or an ``ExceptionGroup`` of them."""
+def _annotation_errors(
+    exc: AnnotationError | ExceptionGroup, *, conversions: bool = False
+) -> list[AnnotationError]:
+    """The errors a parser or validator raised: one, or an ``ExceptionGroup`` of them.
+
+    With *conversions*, an encoder's, a group's ``CONVERSION_ERRORS`` count as well.
+    """
     if isinstance(exc, AnnotationError):
         return [exc]
-    matched, rest = exc.split(AnnotationError)
+    accepted = (AnnotationError, *CONVERSION_ERRORS) if conversions else AnnotationError
+    matched, rest = exc.split(accepted)
     if rest is not None:
         raise rest
     assert matched is not None
-    return _leaves(matched)
+    return [
+        e if isinstance(e, AnnotationError) else AnnotationError(str(e)) for e in _leaves(matched)
+    ]
 
 
-def _leaves(group: BaseExceptionGroup) -> list[AnnotationError]:
-    out: list[AnnotationError] = []
+def _leaves(group: BaseExceptionGroup) -> list[Exception]:
+    out: list[Exception] = []
     for exc in group.exceptions:
         if isinstance(exc, BaseExceptionGroup):
             out.extend(_leaves(exc))
-        elif isinstance(exc, AnnotationError):
+        elif isinstance(exc, Exception):
             out.append(exc)
     return out
+
+
+def _member_origin(cell: CellAnalysis) -> tuple[str | None, int | None]:
+    """The annotation and line of the cell's Member effect: ``@variant``, or a host's."""
+    for effect, origin in zip(cell.effects, cell.origins, strict=True):
+        if isinstance(effect, Member) and effect == cell.member:
+            return origin
+    return None, None
 
 
 def _first_line(directives: list[Directive], key: str) -> int | None:
@@ -414,7 +461,7 @@ def _parse_phase(
         except (AnnotationError, ExceptionGroup) as raised:
             for exc in _annotation_errors(raised):
                 ca.error(
-                    exc.code or f"{directives[0].key}_unreadable",
+                    exc.code or f"{annotation.key}_unreadable",
                     str(exc),
                     annotation=annotation.key,
                     line=exc.line if exc.line is not None else directives[0].line,
@@ -425,7 +472,7 @@ def _parse_phase(
         if isinstance(value, Partial):
             for exc in value.errors:
                 ca.error(
-                    exc.code or f"{directives[0].key}_unreadable",
+                    exc.code or f"{annotation.key}_unreadable",
                     str(exc),
                     annotation=annotation.key,
                     line=exc.line if exc.line is not None else directives[0].line,
@@ -433,19 +480,7 @@ def _parse_phase(
             value = value.value
         ca.annotations[annotation.key] = value
         if annotation.in_key:
-            encoded = annotation.encode(value) if annotation.encode is not None else value
-            if not is_canonical(encoded):
-                ca.error(
-                    f"{annotation.key}_unencodable",
-                    f"`@{annotation.key}` has a value the key cannot encode "
-                    f"({type(encoded).__name__}); the annotation needs an encoder",
-                    annotation=annotation.key,
-                    line=directives[0].line,
-                    args={"type": type(encoded).__name__},
-                )
-                ca.unkeyed.append(annotation.key)
-            else:
-                ca.key_fields[annotation.key] = encoded
+            _encode(ca, annotation, value, directives[0].line)
         if annotation.effects is not None:
             produced = list(annotation.effects(value))
             ca.effects.extend(produced)
@@ -464,6 +499,38 @@ def _parse_phase(
         ca.error("syntax_error", analyzed.error)
     ca.diagnostics.extend(replace(d, cell=ca.id) for d in analyzed.diagnostics)
     return ca, analyzed
+
+
+def _encode(ca: CellAnalysis, annotation: Annotation, value: Any, line: int) -> None:
+    """The annotation's key field, or ``<key>_unencodable`` and the key in ``unkeyed``."""
+    key = annotation.key
+    try:
+        encoded = annotation.encode(value) if annotation.encode is not None else value
+    except (AnnotationError, ExceptionGroup) as raised:
+        errors = _annotation_errors(raised, conversions=True)
+    except CONVERSION_ERRORS as raised:
+        errors = [AnnotationError(f"`@{key}` could not be encoded: {raised}")]
+    else:
+        if is_canonical(encoded):
+            ca.key_fields[key] = encoded
+            return
+        name = type(encoded).__name__
+        ca.error(
+            f"{key}_unencodable",
+            f"`@{key}` has a value the key cannot encode ({name}); the annotation needs an encoder",
+            annotation=key,
+            line=line,
+            args={"type": name},
+        )
+        errors = []
+    for exc in errors:
+        ca.error(
+            exc.code or f"{key}_unencodable",
+            str(exc),
+            annotation=key,
+            line=exc.line if exc.line is not None else line,
+        )
+    ca.unkeyed.append(key)
 
 
 def _names_phase(ca: CellAnalysis, analyzed: Analyzed) -> None:
@@ -488,21 +555,33 @@ def _names_phase(ca: CellAnalysis, analyzed: Analyzed) -> None:
                 references.append(name)
 
     bound: list[str] = []
-    for effect in ca.effects:
+    bound_by: dict[str, tuple[str | None, int | None]] = {}
+    for effect, origin in zip(ca.effects, ca.origins, strict=True):
         if isinstance(effect, Binds):
             for name in effect.names:
                 if name in bound:
-                    ca.error("bind_conflict", f"`{name}` is bound twice", args={"name": name})
+                    annotation, line = origin
+                    ca.error(
+                        "bind_conflict",
+                        f"`{name}` is bound twice",
+                        annotation=annotation,
+                        line=line,
+                        args={"name": name},
+                    )
                 else:
                     bound.append(name)
+                    bound_by[name] = origin
     for name in sorted(set(bound) & set(read)):
+        annotation, line = bound_by[name]
         ca.error(
             "bind_read_conflict",
             f"`{name}` is both bound and read from upstream",
+            annotation=annotation,
+            line=line,
             args={"name": name},
         )
 
-    for effect in ca.effects:
+    for effect, (origin, origin_line) in zip(ca.effects, ca.origins, strict=True):
         if isinstance(effect, FanOut) and effect.over is not None:
             # An instance's key leaves the source out, so the cell must not read it whole:
             # not in its body (a builtin's name included), nor through a Reads effect.
@@ -511,7 +590,8 @@ def _names_phase(ca: CellAnalysis, analyzed: Analyzed) -> None:
                     "each_reads_source",
                     f"the cell reads `{effect.over}` itself, which every item's result would "
                     "then depend on; read each item, or compute it in a cell before this one",
-                    annotation="each",
+                    annotation=origin,
+                    line=origin_line,
                     args={"source": effect.over},
                 )
             elif effect.over not in bound and effect.over not in references:
@@ -523,11 +603,13 @@ def _names_phase(ca: CellAnalysis, analyzed: Analyzed) -> None:
     ca.mutation_defines = list(analyzed.mutation_defines)
     ca.bound = bound
 
+    member_conflict = fanout_conflict = False
     for effect, (origin, origin_line) in zip(ca.effects, ca.origins, strict=True):
         if isinstance(effect, After):
             for cell_id in effect.cell_ids:
                 if cell_id not in ca.after:
                     ca.after.append(cell_id)
+                    ca.after_origins[cell_id] = origin
         elif isinstance(effect, Seeds):
             if effect.name in ca.seeds and ca.seeds[effect.name] != effect.cell_id:
                 ca.error(
@@ -548,7 +630,11 @@ def _names_phase(ca: CellAnalysis, analyzed: Analyzed) -> None:
                     line=origin_line,
                     args={"name": effect.name},
                 )
+        # A conflicting cell joins no group and fans out no way: keeping either side
+        # would let composition order decide.
         elif isinstance(effect, Member):
+            if member_conflict:
+                continue
             if ca.member is not None and ca.member != effect:
                 ca.error(
                     "member_conflict",
@@ -556,8 +642,12 @@ def _names_phase(ca: CellAnalysis, analyzed: Analyzed) -> None:
                     annotation=origin,
                     line=origin_line,
                 )
-            ca.member = effect
+                ca.member, member_conflict = None, True
+            else:
+                ca.member = effect
         elif isinstance(effect, FanOut):
+            if fanout_conflict:
+                continue
             if ca.fanout is not None and ca.fanout != effect:
                 ca.error(
                     "fanout_conflict",
@@ -565,7 +655,9 @@ def _names_phase(ca: CellAnalysis, analyzed: Analyzed) -> None:
                     annotation=origin,
                     line=origin_line,
                 )
-            ca.fanout = effect
+                ca.fanout, fanout_conflict = None, True
+            else:
+                ca.fanout, ca.fanout_origin = effect, (origin, origin_line)
         elif isinstance(effect, Keeps):
             ca.kept.extend(name for name in effect.names if name not in ca.kept)
         elif isinstance(effect, Input):
@@ -591,31 +683,43 @@ def _resolve_groups(
     grouped: dict[str, list[tuple[str, str]]] = {}
     group_order: list[str] = []
     by_id = {c.id: c for c in cells}
+    # Every cell sharing a name gets one diagnostic naming them all.
+    named: dict[tuple[str, str], list[str]] = {}
+    for cell in cells:
+        if cell.member is not None:
+            named.setdefault((cell.member.group, cell.member.name), []).append(cell.id)
+    for (group, name), cids in named.items():
+        if len(cids) < 2:
+            continue
+        message = (
+            f"Variant name '{name}' is used by cells {', '.join(c[:8] for c in cids)} "
+            f"in group '{group}'"
+        )
+        for cid in cids:
+            origin, origin_line = _member_origin(by_id[cid])
+            by_id[cid].error(
+                "variant_collision",
+                message,
+                annotation=origin,
+                line=origin_line,
+                args={"group": group, "name": name, "cells": list(cids)},
+            )
+    repeats: set[str] = set()
     for cell in cells:
         if cell.member is None:
             continue
         group, name = cell.member.group, cell.member.name
         members = grouped.setdefault(group, [])
-        clash = next((cid for cid, n in members if n == name), None)
-        if clash is not None:
-            message = (
-                f"Variant name '{name}' is used by both cell {clash[:8]} and cell "
-                f"{cell.id[:8]} in group '{group}'"
-            )
-            for cid in (clash, cell.id):
-                by_id[cid].error(
-                    "variant_collision",
-                    message,
-                    annotation="variant",
-                    args={"group": group, "name": name, "cells": [clash, cell.id]},
-                )
+        if named[(group, name)][0] != cell.id:
+            # The first cell keeps the name; a repeat, like an inactive member, feeds no one.
+            repeats.add(cell.id)
             continue
         if not members:
             group_order.append(group)
         members.append((cell.id, name))
 
     resolutions: list[VariantGroupResolution] = []
-    inactive: set[str] = set()
+    inactive: set[str] = set(repeats)
     for group in group_order:
         members = grouped[group]
         is_sweep = group in sweep
@@ -648,7 +752,7 @@ def _variant_notes(cells: list[CellAnalysis], dag: Dag, groups: GroupConfig) -> 
         if cell.member is None or cell.member.group not in members:
             continue
         group = cell.member.group
-        line = _first_line(cell.directives, "variant")
+        origin, line = _member_origin(cell)
         siblings = [by_id[cid] for cid, _ in members[group].members if cid != cell.id]
         own = set(cell.defines) - _top_level_imports(cell.source)
         for sibling in siblings:
@@ -660,7 +764,7 @@ def _variant_notes(cells: list[CellAnalysis], dag: Dag, groups: GroupConfig) -> 
                     f"variant `{cell.member.name}` of `{group}` defines {sorted(own)}, "
                     f"its sibling `{sibling.member.name if sibling.member else '?'}` "
                     f"defines {sorted(theirs)}",
-                    annotation="variant",
+                    annotation=origin,
                     line=line,
                     args={
                         "group": group,
@@ -677,7 +781,7 @@ def _variant_notes(cells: list[CellAnalysis], dag: Dag, groups: GroupConfig) -> 
                 "variant_mode_invalid",
                 Severity.WARN,
                 f"group `{group}` has mode {mode!r}; it runs as a switch",
-                annotation="variant",
+                annotation=origin,
                 line=line,
                 args={"group": group, "mode": mode},
             )
@@ -687,7 +791,7 @@ def _variant_notes(cells: list[CellAnalysis], dag: Dag, groups: GroupConfig) -> 
                 "variant_active_redundant",
                 Severity.INFO,
                 f"group `{group}` is a sweep, so its active selection is ignored",
-                annotation="variant",
+                annotation=origin,
                 line=line,
                 args={"group": group, "active": active},
             )
@@ -698,7 +802,7 @@ def _variant_notes(cells: list[CellAnalysis], dag: Dag, groups: GroupConfig) -> 
                     "variant_active_unknown",
                     Severity.WARN,
                     f"group `{group}` selects `{active}`, which no cell provides",
-                    annotation="variant",
+                    annotation=origin,
                     line=line,
                     args={"group": group, "active": active},
                 )
@@ -743,6 +847,8 @@ def _wiring_phase(cells: list[CellAnalysis], groups: GroupConfig) -> Dag:
     # defines: a mutating cell reads the prior value and produces the new one.
     active_ids = set(cell_ids) - inactive
     for cell in cells:
+        # An inactive member is not wired: what it would read depends on the selection,
+        # so a host selects it and analyzes again (``InactiveVariantError``).
         if cell.id in inactive:
             continue
         for var in (*cell.references, *cell.builtin_references):
@@ -792,13 +898,14 @@ def _wiring_phase(cells: list[CellAnalysis], groups: GroupConfig) -> Dag:
         dag.consumed_variables[cell.id].update(v for v in cell.kept if v in cell.defines)
 
         for upstream_id in cell.after:
-            line = _naming_line(cell.directives, "after", upstream_id)
+            origin = cell.after_origins.get(upstream_id)
+            line = _naming_line(cell.directives, origin, upstream_id) if origin else None
             if upstream_id == cell.id:
                 cell.note(
                     "after_self",
                     Severity.WARN,
                     "`@after` names this cell",
-                    annotation="after",
+                    annotation=origin,
                     line=line,
                     args={"cell_id": upstream_id},
                 )
@@ -807,7 +914,7 @@ def _wiring_phase(cells: list[CellAnalysis], groups: GroupConfig) -> Dag:
                 cell.error(
                     "after_unknown_cell",
                     f"`@after {upstream_id}` names no cell",
-                    annotation="after",
+                    annotation=origin,
                     line=line,
                     args={"cell_id": upstream_id},
                 )
@@ -816,7 +923,7 @@ def _wiring_phase(cells: list[CellAnalysis], groups: GroupConfig) -> Dag:
                 cell.error(
                     "after_inactive_variant",
                     f"`@after {upstream_id}` names a variant that is not active",
-                    annotation="after",
+                    annotation=origin,
                     line=line,
                     args={"cell_id": upstream_id},
                 )
@@ -830,7 +937,8 @@ def _wiring_phase(cells: list[CellAnalysis], groups: GroupConfig) -> Dag:
         is_sweep_member = cell.id in sweep_member_group
         fanout_group: str | None = None
         if cell.fanout is not None and cell.fanout.over is not None:
-            dag.each_cells[cell.id] = cell.fanout.over
+            if cell.member is None:
+                dag.each_cells[cell.id] = cell.fanout.over
             _each_notes(cell, dag)
         elif cell.fanout is not None:
             read_groups = dag.sweep_groups_read(cell.id)
@@ -840,7 +948,7 @@ def _wiring_phase(cells: list[CellAnalysis], groups: GroupConfig) -> Dag:
             else:
                 fanout_group = next(iter(read_groups)) if len(read_groups) == 1 else None
             _fanout_notes(cell, read_groups, sweep_group_variant_names)
-        if fanout_group is not None and not is_sweep_member:
+        if fanout_group is not None and cell.member is None:
             dag.fanout_cells[cell.id] = SweepProducer(
                 group=fanout_group,
                 variants=tuple(
@@ -870,13 +978,15 @@ def _wiring_phase(cells: list[CellAnalysis], groups: GroupConfig) -> Dag:
         if not dag.cell_upstream[cell_id]:
             dag.roots.add(cell_id)
 
-    on_cycle = _on_cycles(dag, active_cell_ids)
-    if on_cycle:
-        cycles = _cycles(dag, active_cell_ids)
-        message = "Cycle detected in DAG: " + (" → ".join(cycles[0]) if cycles else "unknown")
-        for cid in active_cell_ids:
-            if cid in on_cycle:
-                cell_by_id[cid].error("cycle", message, args={"cycle": cycles[0] if cycles else []})
+    position = {cid: i for i, cid in enumerate(active_cell_ids)}
+    cycles = [c for c in _strong_components(dag, active_cell_ids) if len(c) > 1]
+    for component in cycles:
+        # Each cycle is reported on its own cells, through the first of them.
+        ordered = sorted(component, key=position.__getitem__)
+        cycle = _cycle_through(dag, component, ordered[0])
+        message = "Cycle detected in DAG: " + " → ".join(cycle)
+        for cid in ordered:
+            cell_by_id[cid].error("cycle", message, args={"cycle": cycle})
     dag.topological_order = _kahn(dag, active_cell_ids)
     return dag
 
@@ -885,12 +995,12 @@ def _each_notes(cell: CellAnalysis, dag: Dag) -> None:
     """What an ``@each`` cell cannot iterate, or be."""
     assert cell.fanout is not None and cell.fanout.over is not None
     source = cell.fanout.over
-    line = _first_line(cell.directives, "each")
+    origin, line = cell.fanout_origin
     if cell.member is not None:
         cell.error(
             "each_on_variant_member",
             "a variant member cannot also run once per item",
-            annotation="each",
+            annotation=origin,
             line=line,
         )
     if source in cell.bound:
@@ -900,7 +1010,7 @@ def _each_notes(cell: CellAnalysis, dag: Dag) -> None:
         cell.error(
             "each_over_sweep",
             f"`{source}` comes from a sweep, which has no one collection to iterate",
-            annotation="each",
+            annotation=origin,
             line=line,
             args={"source": source},
         )
@@ -908,7 +1018,7 @@ def _each_notes(cell: CellAnalysis, dag: Dag) -> None:
         cell.error(
             "each_unknown_source",
             f"no cell before this one defines `{source}`, and the cell does not bind it",
-            annotation="each",
+            annotation=origin,
             line=line,
             args={"source": source},
         )
@@ -919,13 +1029,13 @@ def _fanout_notes(
 ) -> None:
     """Strata's ``@per_variant`` warnings, against the sweep groups the cell reads."""
     assert cell.fanout is not None
-    line = _first_line(cell.directives, "per_variant")
+    origin, line = cell.fanout_origin
     if cell.member is not None:
         cell.note(
             "per_variant_on_variant_member",
             Severity.WARN,
             "a variant member cannot also fan out over a group",
-            annotation="per_variant",
+            annotation=origin,
             line=line,
         )
         return
@@ -936,7 +1046,7 @@ def _fanout_notes(
                 "per_variant_unknown_group",
                 Severity.WARN,
                 f"`@per_variant {named}` names no sweep group the cell reads",
-                annotation="per_variant",
+                annotation=origin,
                 line=line,
                 args={"group": named},
             )
@@ -948,7 +1058,7 @@ def _fanout_notes(
                 "per_variant_no_sweep_source",
                 Severity.WARN,
                 "`@per_variant` reads no sweep-produced variable",
-                annotation="per_variant",
+                annotation=origin,
                 line=line,
             )
             return
@@ -957,7 +1067,7 @@ def _fanout_notes(
                 "per_variant_ambiguous_group",
                 Severity.WARN,
                 f"`@per_variant` reads {', '.join(sorted(read_groups))}; name one",
-                annotation="per_variant",
+                annotation=origin,
                 line=line,
                 args={"groups": sorted(read_groups)},
             )
@@ -968,7 +1078,7 @@ def _fanout_notes(
             "per_variant_group_of_one",
             Severity.INFO,
             f"group `{effective}` has one variant",
-            annotation="per_variant",
+            annotation=origin,
             line=line,
             args={"group": effective},
         )
@@ -1080,6 +1190,10 @@ def analyze(
     table = dict(analyzers) if analyzers is not None else registered_analyzers()
     groups = groups or GroupConfig()
     cell_list = list(cells)
+    # Cells are found by id, so a repeated one would silently replace the other.
+    repeated = sorted(cid for cid, n in Counter(c.id for c in cell_list).items() if n > 1)
+    if repeated:
+        raise ValueError(f"cell ids must be unique; repeated: {repeated}")
 
     analyses: list[CellAnalysis] = []
     for cell in cell_list:
@@ -1099,9 +1213,8 @@ def analyze(
                 cell=cell, defines=tuple(ca.defines), references=tuple(ca.references), host=context
             )
             try:
-                ca.diagnostics.extend(
-                    annotation.validate(ca.annotations[annotation.key], context_view)
-                )
+                found = annotation.validate(ca.annotations[annotation.key], context_view)
+                ca.diagnostics.extend(replace(d, cell=ca.id) for d in found)
             except (AnnotationError, ExceptionGroup) as raised:
                 first = next((d.line for d in ca.directives if d.key in annotation.keys), None)
                 for exc in _annotation_errors(raised):
@@ -1116,23 +1229,25 @@ def analyze(
     _variant_notes(analyses, graph, groups)
 
     by_id = {ca.id: ca for ca in analyses}
-    for ca in analyses:
-        if ca.has_error:
-            ca.plannable = False
-            ca.blocked_by = [ca.id]
-    for blocker in [ca.id for ca in analyses if not ca.plannable]:
-        queue: deque[str] = deque(graph.cell_downstream.get(blocker, []))
-        seen: set[str] = set()
-        while queue:
-            current = queue.popleft()
-            if current in seen:
-                continue
-            seen.add(current)
-            target = by_id[current]
-            target.plannable = False
-            if blocker not in target.blocked_by:
-                target.blocked_by.append(blocker)
-            queue.extend(graph.cell_downstream.get(current, []))
+    # One pass over the components, upstream ones first: a component's blockers are
+    # its own erroring cells and its upstreams' blockers.
+    ids = [ca.id for ca in analyses]
+    position = {cid: i for i, cid in enumerate(ids)}
+    blockers_of: dict[str, set[str]] = {}
+    for component in reversed(_strong_components(graph, ids)):
+        inside = set(component)
+        blockers = {cid for cid in component if by_id[cid].has_error}
+        for cid in component:
+            for upstream in graph.cell_upstream[cid]:
+                if upstream not in inside:
+                    blockers |= blockers_of[upstream]
+        ordered = sorted(blockers, key=position.__getitem__)
+        for cid in component:
+            blockers_of[cid] = blockers
+            target = by_id[cid]
+            target.plannable = not blockers
+            # Its own errors first, then the cells upstream that block it.
+            target.blocked_by = [cid] * (cid in blockers) + [b for b in ordered if b != cid]
 
     plannable = {ca.id for ca in analyses if ca.plannable}
     analysis = Analysis(
