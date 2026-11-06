@@ -10,10 +10,13 @@ authors = [{ name = "Fangchen Li", email = "fangchen.li@outlook.com" }]
 classifiers = [
     "Development Status :: 2 - Pre-Alpha",
     "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
+    "Typing :: Typed",
 ]
 # Stdlib only: a host brings its own vocabulary, analyzers and resolvers.
 dependencies = []
@@ -37,7 +40,8 @@ dev = [
     # The same ruff as .pre-commit-config.yaml.
     "ruff==0.17.1",
     "pre-commit>=4.0.0",
-    "ty>=0.0.24",
+    # Pinned like ruff: a new ty can find new errors in unchanged code.
+    "ty==0.0.95",
 ]
 
 [tool.pytest.ini_options]
@@ -50,7 +54,7 @@ python-version = "3.12"
 python = ".venv"
 
 [tool.ty.src]
-include = ["src"]
+include = ["src", "tests"]
 
 [tool.ruff]
 line-length = 100

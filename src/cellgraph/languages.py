@@ -1,4 +1,4 @@
-"""The language analyzer protocol and its registry (design 7.1).
+"""The language analyzer protocol and its registry.
 
 An analyzer gives a cell's defines and references, and the normalized text its
 definition key is built from. ``owns_key`` is False when the host computes the
@@ -77,7 +77,7 @@ def comment_marker(analyzer: LanguageAnalyzer) -> str:
 
 
 def strip_lines(source: str) -> str:
-    """The default normalizer: trailing whitespace per line, and outer blank lines, dropped."""
+    """A ready-made normalizer: trailing whitespace per line, and outer blank lines, dropped."""
     lines = [line.rstrip() for line in source.splitlines()]
     return "\n".join(lines).strip()
 

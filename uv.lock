@@ -25,7 +25,7 @@ dev = [
     { name = "pytest", specifier = ">=8.0.0" },
     { name = "pytest-timeout", specifier = ">=2.3.0" },
     { name = "ruff", specifier = "==0.17.1" },
-    { name = "ty", specifier = ">=0.0.24" },
+    { name = "ty", specifier = "==0.0.95" },
     { name = "vestigo", specifier = "==0.3.1" },
 ]
 

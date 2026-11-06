@@ -1,4 +1,4 @@
-"""What to run before a cell (design 8): readiness, not keys.
+"""What to run before a cell: readiness, not keys.
 
 A downstream key can depend on an upstream's bytes and on inputs resolved at run
 time, so it does not exist before the upstream runs. The plan therefore asks the

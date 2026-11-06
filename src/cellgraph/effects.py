@@ -1,4 +1,4 @@
-"""The ten effects an annotation can have on the graph (design 4.1).
+"""The ten effects an annotation can have on the graph.
 
 The set is closed: ``analyze`` applies these and never interprets a host's
 annotation beyond them. Names are tuples, so an effect is hashable and compares

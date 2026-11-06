@@ -54,6 +54,22 @@ class Grammar:
         if check_marker(marker) != self.marker:
             self._set_marker(marker)
 
+    def __eq__(self, other: object) -> bool:
+        """Equal grammars read and write alike: same class, marker and pattern.
+
+        A subclass with state of its own overrides this.
+        """
+        if not isinstance(other, Grammar):
+            return NotImplemented
+        return (type(self), self.marker, self.directive_re.pattern) == (
+            type(other),
+            other.marker,
+            other.directive_re.pattern,
+        )
+
+    def __hash__(self) -> int:
+        return hash((type(self), self.marker, self.directive_re.pattern))
+
     def with_marker(self, marker: str) -> Grammar:
         """This grammar for *marker*: itself when it already uses it, else a copy.
 

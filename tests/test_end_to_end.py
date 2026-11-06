@@ -320,6 +320,7 @@ def test_a_bound_source_is_left_out_of_an_item_key_too():
     resolve = {"mount": lambda spec: cg.Resolved(spec.name, "fp")}
 
     whole = analysis.execution_key("c0", published=published(), resolve=resolve, env_hash=ENV)
+    assert isinstance(whole, cg.Keyed)
     assert whole.parts["inputs"] == [
         ["mount", "raw", cg.canonical_json(["mount", "raw", "raw", "fp"])]
     ]
@@ -329,14 +330,13 @@ def test_a_bound_source_is_left_out_of_an_item_key_too():
     key = analysis.execution_key(
         "c0", instance=item, published=published(), resolve=resolve, env_hash=ENV
     )
+    assert isinstance(key, cg.Keyed)
     assert key.parts["inputs"] == []
     assert key.parts["upstream"] == [["each:raw", "each:a.csv=d1"]]
-    assert (
-        analysis.execution_key(
-            "c0", instance=item, published=published(), resolve=moved, env_hash=ENV
-        ).digest
-        == key.digest
+    again = analysis.execution_key(
+        "c0", instance=item, published=published(), resolve=moved, env_hash=ENV
     )
+    assert isinstance(again, cg.Keyed) and again.digest == key.digest
 
 
 def test_an_instance_of_an_each_cell_is_an_item(run):

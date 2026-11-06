@@ -1,4 +1,4 @@
-"""Annotations and the vocabulary a host composes from them (design 4).
+"""Annotations and the vocabulary a host composes from them.
 
 An annotation declares its key (and any extra keys it reads), a parser from its
 directive lines to a value, its effects from the closed set in ``effects``, whether
@@ -123,7 +123,7 @@ def stacked(item: Callable[[Directive], Any]) -> Parser:
 
 def mark_stacked(parse: Parser) -> Parser:
     """Mark *parse* as reading repeated lines, so ``set_directive`` refuses its key."""
-    setattr(parse, "stacked", True)  # noqa: B010
+    setattr(parse, "stacked", True)
     return parse
 
 
@@ -197,7 +197,7 @@ class Vocabulary:
 
     @classmethod
     def core(cls) -> Vocabulary:
-        """``@name``, ``@after``, ``@nocache``, ``@variant`` and ``@per_variant`` (design 6)."""
+        """``@name``, ``@after``, ``@nocache``, ``@variant``, ``@per_variant`` and ``@each``."""
         from cellgraph.core import core_annotations
 
         return cls(core_annotations())
@@ -205,11 +205,11 @@ class Vocabulary:
     def __or__(self, other: Vocabulary) -> Vocabulary:
         """Both vocabularies; a key in both is refused, so order never decides a result.
 
-        A custom grammar on one side is kept; one on each side is refused unless it
-        is the same grammar.
+        A custom grammar on one side is kept; one on each side is refused unless the
+        two are equal (``Grammar.__eq__``), and then the left one is kept.
         """
-        custom = [g for g in (self.grammar, other.grammar) if g is not GRAMMAR]
-        if len(custom) == 2 and custom[0] is not custom[1]:
+        custom = [g for g in (self.grammar, other.grammar) if g != GRAMMAR]
+        if len(custom) == 2 and custom[0] != custom[1]:
             raise ValueError("both vocabularies have their own grammar")
         hooks = [hook for hook in (self.cell_effects, other.cell_effects) if hook is not None]
         combined: CellEffects | None
