@@ -49,6 +49,7 @@ from cellgraph.keys import (
     VariantRead,
     canonical_json,
     derive_subkey,
+    is_canonical,
     parts_digest,
 )
 from cellgraph.languages import (
@@ -133,6 +134,7 @@ __all__ = [
     "directive_keys",
     "flag",
     "get_language_analyzer",
+    "is_canonical",
     "is_stacked",
     "mark_stacked",
     "parts_digest",

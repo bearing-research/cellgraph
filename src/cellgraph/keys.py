@@ -23,6 +23,8 @@ if TYPE_CHECKING:
     from cellgraph.analysis import Analysis, CellAnalysis
 
 PARTS_SCHEMA = 2
+# The definition key's own format, so an execution-only change to ``parts`` keeps it.
+_DEFINITION_FORMAT = 1
 
 
 def derive_subkey(parent_hash: str, *labels: str) -> str:
@@ -36,28 +38,28 @@ def derive_subkey(parent_hash: str, *labels: str) -> str:
     return hashlib.sha256(":".join([parent_hash, *labels]).encode()).hexdigest()
 
 
-def canonical_json(value: Any) -> str:
-    """Sorted keys, no whitespace, UTF-8 as is; NaN, infinity and non-str keys refused.
+def is_canonical(value: Any) -> bool:
+    """None, bool, int, finite float, str, and lists and str-keyed dicts of these.
 
-    ``json`` would write ``{1: "a"}`` as ``{"1": "a"}``, so two values would share a key.
+    Exactly what JSON round-trips: ``json`` would write ``{1: "a"}`` as ``{"1": "a"}``
+    and a tuple as a list, so two values would share a key.
     """
-    _check_json(value)
-    return json.dumps(
-        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
-    )
-
-
-def _check_json(value: Any) -> None:
+    if value is None or isinstance(value, bool | int | str):
+        return True
+    if isinstance(value, float):
+        return math.isfinite(value)
+    if isinstance(value, list):
+        return all(is_canonical(item) for item in value)
     if isinstance(value, dict):
-        for key, item in value.items():
-            if not isinstance(key, str):
-                raise TypeError(f"a canonical JSON key must be a str, not {key!r}")
-            _check_json(item)
-    elif isinstance(value, (list, tuple)):
-        for item in value:
-            _check_json(item)
-    elif isinstance(value, float) and not math.isfinite(value):
-        raise ValueError(f"canonical JSON has no {value!r}")
+        return all(isinstance(k, str) and is_canonical(v) for k, v in value.items())
+    return False
+
+
+def canonical_json(value: Any) -> str:
+    """Sorted keys, no whitespace, UTF-8 as is; a value ``is_canonical`` refuses is a TypeError."""
+    if not is_canonical(value):
+        raise TypeError(f"not a canonical JSON value: {value!r}")
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
 def parts_digest(parts: Mapping[str, Any]) -> str:
@@ -185,7 +187,9 @@ def definition_key(analysis: Analysis, cell: CellAnalysis) -> tuple[str, str]:
     body = grammar.strip_directives(cell.source, keys=directive_keys(analyzer))
     normalized = analyzer.normalize(body)
     # The same text in two languages is two programs.
-    text = canonical_json(["definition", PARTS_SCHEMA, cell.language, normalized, cell.key_fields])
+    text = canonical_json(
+        ["definition", _DEFINITION_FORMAT, cell.language, normalized, cell.key_fields]
+    )
     return normalized, _sha256(text)
 
 
@@ -323,7 +327,7 @@ def _upstream(
                 continue
             read = variant_read(analysis, cell_id, upstream_id, var, instance)
             if read is not None and read.fanout:
-                parts = []
+                parts: list[list[str]] = []
                 for name in read.variants:
                     instance_ref = snapshot.instances.get((var, name))
                     if instance_ref is None:
@@ -332,10 +336,11 @@ def _upstream(
                         instance_ref, by_content, f"output:{upstream_id}.{var}@{name}"
                     )
                     if value is not None:
-                        parts.append(f"{name}={value}")
+                        parts.append([name, value])
+                # A list, not a joined string: a host's run id may hold any separator.
                 prefix = "variant" if read.scalar else "fanout"
                 assembly.add(
-                    f"instances:{upstream_id}.{var}", f"{prefix}:{var}:{';'.join(sorted(parts))}"
+                    f"instances:{upstream_id}.{var}", canonical_json([prefix, var, sorted(parts)])
                 )
                 continue
             if read is not None and not read.variants:
@@ -359,8 +364,8 @@ def _upstream(
                 assembly.add(f"wired:{upstream_id}.{var}", f"wired:{var}={value}")
 
     for var, pairs in sweep_buckets.items():
-        joined = ";".join(f"{name}={value}" for name, value in sorted(pairs))
-        assembly.add(f"sweep:{var}", f"sweep:{var}:{joined}")
+        members = sorted([name, value] for name, value in pairs)
+        assembly.add(f"sweep:{var}", canonical_json(["sweep", var, members]))
     return assembly
 
 
@@ -433,10 +438,8 @@ def execution_key(
         component = canonical_json([spec.kind, spec.name, result.identity, result.fingerprint])
         inputs.append((spec.kind, spec.name, component))
 
-    # A field the key cannot encode is missing from the definition key, so no key is sound.
-    for d in cell.diagnostics:
-        if d.annotation is not None and d.code == f"{d.annotation}_unencodable":
-            assembly.unresolved.append(f"field:{d.annotation}")
+    # A field missing from the definition key leaves no sound key.
+    assembly.unresolved.extend(f"field:{key}" for key in cell.unkeyed)
 
     assert cell.definition_key is not None
     parts: dict[str, Any] = {

@@ -175,7 +175,7 @@ still gets names, edges, plannability and plan steps, and `execution_key` return
 ## Analysis
 
 ```python
-analyze(cells, vocabulary, groups=None, strict=False, *, analyzers=None, context=None)
+analyze(cells, vocabulary, groups=None, *, strict=False, analyzers=None, context=None)
 ```
 
 `groups` is `GroupConfig(modes={group: "switch" | "sweep"}, active={group: name})`.
@@ -250,11 +250,12 @@ wired, planned and keyed.
 
 ```
 normalized = the language's normalize() of the source without its directive lines
-key        = sha256(canonical_json(["definition", PARTS_SCHEMA, language,
-                                    normalized, fields]))
+key        = sha256(canonical_json(["definition", 1, language, normalized, fields]))
 ```
 
-`fields` is the cell's `key_fields`. Comments other than directives stay in the
+`fields` is the cell's `key_fields`; `1` is the definition key's own format, apart
+from `PARTS_SCHEMA`. An in-key annotation that is present but could not be read or
+encoded is listed in the cell's `unkeyed`, and its execution key is `Unavailable`. Comments other than directives stay in the
 body for the normalizer to judge; Python's drops them in its AST round trip. The
 language is in the key: the same text in two languages is two programs.
 
@@ -293,7 +294,7 @@ Results:
 - `Keyed(digest, parts)`.
 - `Unavailable(reason, parts, unresolved)`: an unreadable output, a no-cache
   output without a content digest (its key follows its bytes), an unresolved
-  input, or a key field the key cannot encode (`field:<key>`).
+  input, or an in-key annotation missing from the fields (`field:<key>`).
 - `HostKeyed(parts, unresolved)`: for a language with `owns_key=False`. `parts`
   holds the upstream components it reads and no inputs; the host adds its own and
   keys them with `parts_digest`. `unresolved` names the upstreams that could not
@@ -324,8 +325,12 @@ its address, so swapping two variables' contents changes the key.
 
 `derive_subkey(parent, *labels)` is `sha256("parent:label1:...")`, byte-identical
 to vestigo's; a label containing `:` is refused. `canonical_json` sorts keys, has
-no whitespace, keeps UTF-8 as is, and refuses NaN, infinity and a dict key that
-is not a str (which `json` would turn into one, so two values would share a key).
+no whitespace and keeps UTF-8 as is. It takes only what `is_canonical` accepts
+(None, bool, int, finite float, str, and lists and str-keyed dicts of these),
+which is also the rule for a key field: `json` would turn `{1: "a"}` into
+`{"1": "a"}` and a tuple into a list, so two values would share a key. Anything
+else is a `TypeError`. Fan-out and sweep components are JSON lists of
+`[name, component]` pairs, so no host string can forge another instance.
 
 ## Planning
 

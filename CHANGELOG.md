@@ -11,15 +11,18 @@
   - The execution key is `parts_digest(parts)`, the hash of `parts` itself, so a
     component counts with its address: swapping two variables' contents changes
     the key. A host keying a `HostKeyed` cell uses `parts_digest` too.
-  - An unreadable output, a no-cache output without a content digest, and a key
-    field the key cannot encode are `Unavailable`, where a key was built without
-    them. `HostKeyed.unresolved` names the upstreams a host-keyed cell could not
+  - An unreadable output, a no-cache output without a content digest, and an
+    in-key annotation that could not be read or encoded (`CellAnalysis.unkeyed`)
+    are `Unavailable`, where a key was built without them. `HostKeyed.unresolved` names the upstreams a host-keyed cell could not
     read.
   - An instance is `scope` and `instance` in `parts`, so an `@each` item key may
     contain `:` (a path or a URI), which `derive_subkey` refused.
-  - `canonical_json` refuses a dict key that is not a str, which `json` would turn
-    into one, so `{1: "a"}` and `{"1": "a"}` shared a key.
-  - `PARTS_SCHEMA` is 2.
+  - `canonical_json` takes only what the new `is_canonical` accepts, the same rule
+    as a key field, so `{1: "a"}` and `{"1": "a"}`, or a tuple and a list, no longer
+    share a key. Fan-out and sweep components are JSON lists, not `;`-joined
+    strings a run id could forge.
+  - `PARTS_SCHEMA` is 2, and the definition key has its own format tag.
+  - `strict` is keyword-only, so an old positional call fails loudly.
 - `each_reads_source` also covers a source read through a `Reads` effect or named
   like a builtin, which an item key would have left out (#14).
 

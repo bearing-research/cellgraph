@@ -10,9 +10,9 @@ from vestigo.provenance import derive_subkey as vestigo_subkey
 import cellgraph as cg
 
 ENV = "e" * 64
-PINNED_PYTHON = "5cf60a1a11e9631e44ecda5728cb6584bffa0d33a3a318d18b7c63a9b2f5d883"
-PINNED_WORDS = "ba1405d04d3e9d66b09f81db9ab7ac4226ff72a3dbdd54c0a1109a1bd16156a1"
-PINNED_EXECUTION = "959300097c327545a4fb36aacffcd5dc1d072a8912c19ca606d943c39c2d338c"
+PINNED_PYTHON = "9128183dbea770ce61d4daac885cf2abee76c61a706899381b13733ff2dcaba0"
+PINNED_WORDS = "1110e0b11269113eec716724f514a30bbb858f34086badd5609e163e953e6b55"
+PINNED_EXECUTION = "4fe3633fe1bfbcdbb10106093e512598c0bee6613e22c7eb29698462fb64748d"
 
 
 def sha(text):
@@ -45,7 +45,7 @@ def key_of(vocab, source, language="words"):
 def test_the_definition_key_is_the_language_the_body_and_the_fields(vocab):
     cell = key_of(vocab, "# @name n\n# @mode fast\ny  x  ")
     assert cell.normalized == "y  x"
-    expected = ["definition", cg.PARTS_SCHEMA, "words", "y  x", {"mode": {"m": "fast"}}]
+    expected = ["definition", 1, "words", "y  x", {"mode": {"m": "fast"}}]
     assert cell.definition_key == sha(cg.canonical_json(expected))
     # A directive that is not in the key changes nothing. Other comments are the body's,
     # for its normalizer to judge.
@@ -93,16 +93,23 @@ def test_canonical_json_is_sorted_and_compact():
     assert cg.canonical_json({"b": [1, "é"], "a": None}) == '{"a":null,"b":[1,"é"]}'
 
 
-@pytest.mark.parametrize("value", [{1: "a"}, {True: 1}, {None: 1}, [{"ok": {2: 0}}]])
-def test_canonical_json_refuses_a_key_that_is_not_a_str(value):
-    # ``json`` would write ``{1: "a"}`` as ``{"1": "a"}``, and the two would share a key.
-    with pytest.raises(TypeError, match="must be a str"):
-        cg.canonical_json(value)
-
-
-@pytest.mark.parametrize("value", [float("nan"), float("inf"), [-float("inf")]])
-def test_canonical_json_refuses_nan_and_infinity(value):
-    with pytest.raises(ValueError):
+@pytest.mark.parametrize(
+    "value",
+    [
+        {1: "a"},
+        {True: 1},
+        {None: 1},
+        [{"ok": {2: 0}}],
+        ("a",),
+        float("nan"),
+        [-float("inf")],
+        object(),
+    ],
+)
+def test_canonical_json_refuses_what_json_would_not_round_trip(value):
+    # ``json`` writes ``{1: "a"}`` as ``{"1": "a"}`` and a tuple as a list, so two
+    # values would share a key.
+    with pytest.raises(TypeError, match="not a canonical JSON value"):
         cg.canonical_json(value)
 
 
@@ -212,7 +219,7 @@ def test_an_input_is_its_kind_name_identity_and_fingerprint(run):
     assert key("fp").parts["inputs"] == [["file", "data", component]]
     assert key("fp").digest == cg.parts_digest(key("fp").parts)
     assert key("other").digest != key("fp").digest
-    with pytest.raises(TypeError, match="must be a str"):
+    with pytest.raises(TypeError, match="not a canonical JSON value"):
         key({1: "a"})
 
 
@@ -259,12 +266,32 @@ def test_a_blocked_cell_and_its_dependents_are_keyed(run):
     assert below.parts["upstream"] == [["output:c0.x", "h0"]]
 
 
-def test_a_field_the_key_cannot_encode_leaves_no_key(vocab):
-    # Its value is missing from the definition key, so cells that differ in it would share one.
-    odd = cg.Vocabulary([cg.Annotation("m", parse=cg.scalar(lambda s: {1: s}))])
-    analysis = cg.analyze([cg.Cell("c0", "# @m fast\nx = 1")], cg.Vocabulary.core() | odd)
+def _unreadable(directives):
+    raise cg.AnnotationError("no")
+
+
+@pytest.mark.parametrize(
+    "annotation",
+    [
+        cg.Annotation("m", parse=cg.scalar(lambda s: {1: s})),  # unencodable
+        cg.Annotation("m", parse=_unreadable),  # unreadable
+    ],
+)
+def test_an_in_key_annotation_missing_from_the_fields_leaves_no_key(annotation):
+    # The definition key cannot tell this cell from one without the annotation.
+    analysis = cg.analyze(
+        [cg.Cell("c0", "# @m fast\nx = 1"), cg.Cell("c1", "x = 1")],
+        cg.Vocabulary.core() | cg.Vocabulary([annotation]),
+    )
+    assert analysis.cells["c0"].unkeyed == ["m"] and analysis.cells["c1"].unkeyed == []
     key = analysis.execution_key("c0", published=published(), env_hash=ENV)
     assert isinstance(key, cg.Unavailable) and key.unresolved == ("field:m",)
+
+
+def test_strict_is_keyword_only(vocab):
+    # A call written for the removed format arguments fails loudly, not as strict=True.
+    with pytest.raises(TypeError):
+        cg.analyze([cg.Cell("c0", "x = 1")], vocab, None, "cellgraph-1")
 
 
 def test_the_shadowed_reads(run):

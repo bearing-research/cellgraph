@@ -32,7 +32,9 @@ def test_a_sweep_reader_reads_every_member(run):
     key = analysis.execution_key(
         "c2", published=published(c0=out(m="h0"), c1=out(m="h1")), env_hash=ENV
     )
-    assert key.parts["upstream"] == [["sweep:m", "sweep:m:big=h1;small=h0"]]
+    assert key.parts["upstream"] == [
+        ["sweep:m", cg.canonical_json(["sweep", "m", [["big", "h1"], ["small", "h0"]]])]
+    ]
     assert key.digest == cg.parts_digest(key.parts)
 
 
@@ -97,20 +99,38 @@ def test_a_chained_instance_reads_its_upstream_instance(run):
     key = analysis.execution_key(
         "c3", instance="big", published=published(c2=snapshot), env_hash=ENV
     )
-    assert key.parts["upstream"] == [["instances:c2.r", "variant:r:big=rb"]]
+    assert key.parts["upstream"] == [
+        ["instances:c2.r", cg.canonical_json(["variant", "r", [["big", "rb"]]])]
+    ]
 
 
 def test_a_plain_reader_of_a_fan_out_reads_every_instance(run):
     analysis = fanout(run)
     snapshot = fanned("s", small="ss", big="sb")
     key = analysis.execution_key("c4", published=published(c3=snapshot), env_hash=ENV)
-    assert key.parts["upstream"] == [["instances:c3.s", "fanout:s:big=sb;small=ss"]]
+    assert key.parts["upstream"] == [
+        ["instances:c3.s", cg.canonical_json(["fanout", "s", [["big", "sb"], ["small", "ss"]]])]
+    ]
     # An instance not run yet is left out, as Strata's loader drops it.
     partial = cg.Published(
         outputs=snapshot.outputs, instances={("s", "big"): snapshot.instances[("s", "big")]}
     )
     key = analysis.execution_key("c4", published=published(c3=partial), env_hash=ENV)
-    assert key.parts["upstream"] == [["instances:c3.s", "fanout:s:big=sb"]]
+    assert key.parts["upstream"] == [
+        ["instances:c3.s", cg.canonical_json(["fanout", "s", [["big", "sb"]]])]
+    ]
+
+
+def test_a_run_id_cannot_forge_another_instance(run):
+    # A joined string would read ``a=run:x;b=run:y`` for both of these.
+    analysis = fanout(run)
+
+    def key(**refs):
+        instances = {("s", name): cg.OutputRef(cg.Run(rid)) for name, rid in refs.items()}
+        snapshot = cg.Published(outputs={"s": next(iter(instances.values()))}, instances=instances)
+        return analysis.execution_key("c4", published=published(c3=snapshot), env_hash=ENV)
+
+    assert key(big="x;small=run:y").digest != key(big="x", small="y").digest
 
 
 def test_an_instance_must_exist(run):

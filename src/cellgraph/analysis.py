@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import ast
 import difflib
-import math
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -36,6 +35,7 @@ from cellgraph.effects import (
     Seeds,
 )
 from cellgraph.grammar import Directive
+from cellgraph.keys import is_canonical
 from cellgraph.languages import (
     Analyzed,
     LanguageAnalyzer,
@@ -288,6 +288,9 @@ class CellAnalysis:
     inputs: list[Input] = field(default_factory=list)
     nocache: bool = False
     key_fields: dict[str, Any] = field(default_factory=dict)
+    # In-key annotations present but missing from ``key_fields`` (unreadable or
+    # unencodable): the key cannot tell this cell from one without them.
+    unkeyed: list[str] = field(default_factory=list)
     diagnostics: list[Diagnostic] = field(default_factory=list)
     plannable: bool = True
     # The cells whose own errors keep this one from planning (itself included).
@@ -326,19 +329,6 @@ class CellAnalysis:
     @property
     def has_error(self) -> bool:
         return any(d.severity == Severity.ERROR for d in self.diagnostics)
-
-
-def _is_canonical(value: Any) -> bool:
-    """None, bool, int, finite float, str, and lists and str-keyed dicts of these."""
-    if value is None or isinstance(value, bool | int | str):
-        return True
-    if isinstance(value, float):
-        return math.isfinite(value)
-    if isinstance(value, list):
-        return all(_is_canonical(item) for item in value)
-    if isinstance(value, dict):
-        return all(isinstance(k, str) and _is_canonical(v) for k, v in value.items())
-    return False
 
 
 def _annotation_errors(exc: AnnotationError | ExceptionGroup) -> list[AnnotationError]:
@@ -429,6 +419,8 @@ def _parse_phase(
                     annotation=annotation.key,
                     line=exc.line if exc.line is not None else directives[0].line,
                 )
+            if annotation.in_key:
+                ca.unkeyed.append(annotation.key)
             continue
         if isinstance(value, Partial):
             for exc in value.errors:
@@ -442,7 +434,7 @@ def _parse_phase(
         ca.annotations[annotation.key] = value
         if annotation.in_key:
             encoded = annotation.encode(value) if annotation.encode is not None else value
-            if not _is_canonical(encoded):
+            if not is_canonical(encoded):
                 ca.error(
                     f"{annotation.key}_unencodable",
                     f"`@{annotation.key}` has a value the key cannot encode "
@@ -451,6 +443,7 @@ def _parse_phase(
                     line=directives[0].line,
                     args={"type": type(encoded).__name__},
                 )
+                ca.unkeyed.append(annotation.key)
             else:
                 ca.key_fields[annotation.key] = encoded
         if annotation.effects is not None:
@@ -1071,8 +1064,8 @@ def analyze(
     cells: Iterable[Cell],
     vocabulary: Vocabulary,
     groups: GroupConfig | None = None,
-    strict: bool = False,
     *,
+    strict: bool = False,
     analyzers: Mapping[str, LanguageAnalyzer] | None = None,
     context: Any = None,
 ) -> Analysis:
