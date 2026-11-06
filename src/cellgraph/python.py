@@ -1,6 +1,9 @@
 """The Python language analyzer: defines and references from the AST and symtable.
 
-Ported from Strata's ``notebook/analyzer.py`` as is.
+Module-level code runs in source order, so the AST visitor walks it statement by
+statement; function, lambda and generator bodies run later, and ``symtable`` gives
+the module names they read. Names starting with ``_`` are the cell's own and never
+cross cells. What a star import binds cannot be known, so it binds nothing here.
 """
 
 from __future__ import annotations
@@ -9,9 +12,12 @@ import ast
 import builtins
 import functools
 import symtable
+import sys
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from cellgraph.diagnostics import Diagnostic, Severity
 from cellgraph.languages import Analyzed
 
 if TYPE_CHECKING:
@@ -19,13 +25,13 @@ if TYPE_CHECKING:
 
 
 @dataclass
-class CellAnalysis:
-    """Result of analyzing a single cell; ``error`` is None on success."""
+class CellNames:
+    """One cell's names; ``error`` is None on success."""
 
     defines: list[str] = field(default_factory=list)
     references: list[str] = field(default_factory=list)
-    # Defines from in-place mutation (``df["col"] = ...``). The harness forces
-    # serialization of these even when the mutation preserved ``id()``.
+    # Defines from in-place mutation (``df["col"] = ...``): the cell produces the
+    # mutated value even though it never rebinds the name.
     mutation_defines: list[str] = field(default_factory=list)
     # Free names that are builtins, kept out of ``references`` so every
     # ``print``/``len`` caller doesn't list them. A cell can still define
@@ -33,27 +39,26 @@ class CellAnalysis:
     # unshadowed builtin wires nothing, a shadowed one gets its edge.
     builtin_references: list[str] = field(default_factory=list)
     error: str | None = None
+    # The cell nests deeper than the analyzer can walk.
+    too_deep: bool = False
 
 
-def imported_names(source: str) -> set[str]:
-    """Top-level names bound by ``import`` statements in *source*.
+# Walking the AST recurses once per level; a long ``a + a + ...`` chain is that deep.
+_DEEP_RECURSION_LIMIT = 100_000
 
-    A consumer missing one can re-import it, unlike a missing data artifact, so
-    this picks the log level for an absent upstream artifact. Binding rule
-    matches :meth:`VariableAnalyzer.visit_Import`; star imports contribute nothing.
-    """
+
+def _deeply[T](fn: Callable[..., T], *args: object) -> T:
+    """``fn(*args)``, retried once under a higher recursion limit on RecursionError."""
     try:
-        tree = ast.parse(source)
-    except SyntaxError:
-        return set()
-    names: set[str] = set()
-    for node in tree.body:
-        if isinstance(node, (ast.Import, ast.ImportFrom)):
-            for alias in node.names:
-                if alias.name == "*":
-                    continue
-                names.add(alias.asname or alias.name.split(".")[0])
-    return names
+        return fn(*args)
+    except RecursionError:
+        pass
+    old = sys.getrecursionlimit()
+    sys.setrecursionlimit(max(old, _DEEP_RECURSION_LIMIT))
+    try:
+        return fn(*args)
+    finally:
+        sys.setrecursionlimit(old)
 
 
 def _collect_name_targets(target: ast.expr, out: set[str]) -> None:
@@ -104,8 +109,15 @@ class VariableAnalyzer(ast.NodeVisitor):
         # Names bound so far in source order: tells ``x = 0\nx += 1``
         # (local) from a bare ``x += 1`` (upstream read).
         self._defined_so_far: set[str] = set()
-        self._in_nested_scope = False
         self._local_vars: set[str] = set()  # Track local scope variables
+        # Inside a generator's elements, which run when it is iterated: a read
+        # there is not a read before the cell's own binding.
+        self._deferred = False
+        # A class body's analyzer: names it reads that resolve to module globals
+        # whatever the class binds (a comprehension's elements, a nested class).
+        self._in_class = False
+        self._global_scope = False
+        self.global_reads: set[str] = set()
         # PEP 563 stringifies annotations, so under it they are not
         # runtime references.
         self._future_annotations: bool = False
@@ -121,22 +133,25 @@ class VariableAnalyzer(ast.NodeVisitor):
         for child in node.body:
             self.visit(child)
 
+    def _read(self, name: str) -> None:
+        """Record a read of *name*, at this point of the cell."""
+        if name in self._local_vars:
+            return
+        if self._global_scope:
+            self.global_reads.add(name)
+            return
+        self.references.add(name)
+        if name not in self._defined_so_far and not self._deferred:
+            self.read_before_define.add(name)
+
     def visit_Assign(self, node: ast.Assign) -> None:
         """Handle: x = ... or x, y = ..."""
-        all_underscore = all(self._is_pure_underscore(target) for target in node.targets)
-        if not all_underscore:
-            # The RHS runs before the targets bind, so ``x = x + 1`` and swaps
-            # like ``a, b = b, a`` read the upstream value.
-            self.visit(node.value)
+        # The RHS runs before the targets bind, so ``x = x + 1`` and swaps like
+        # ``a, b = b, a`` read the upstream value; ``_ = expr`` still runs expr.
+        self.visit(node.value)
         for target in node.targets:
             self._add_assign_target(target)
             _collect_name_targets(target, self._defined_so_far)
-
-    def _is_pure_underscore(self, target: ast.expr) -> bool:
-        """Check if a target is a pure _ (not part of unpacking)."""
-        if isinstance(target, ast.Name):
-            return target.id == "_"
-        return False
 
     def visit_AugAssign(self, node: ast.AugAssign) -> None:
         """Handle: x += ... or df["col"] += ...
@@ -147,18 +162,21 @@ class VariableAnalyzer(ast.NodeVisitor):
         attribute targets go through ``_add_assign_target``.
         """
         if isinstance(node.target, ast.Name):
-            if node.target.id not in self._defined_so_far:
-                self.references.add(node.target.id)
-                self.read_before_define.add(node.target.id)
+            self._read(node.target.id)
         self._add_assign_target(node.target)
         self.visit(node.value)
         if isinstance(node.target, ast.Name):
             self._defined_so_far.add(node.target.id)
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
-        """Handle: x: int = ... or x: int (without value)."""
-        self._add_assign_target(node.target)
-        # Module-scope annotations are evaluated at runtime unless PEP 563.
+        """Handle: x: int = ... or x: int (without value, which binds nothing)."""
+        if node.value is not None:
+            self._add_assign_target(node.target)
+        elif not isinstance(node.target, ast.Name):
+            self._add_reference_target(node.target)  # ``obj.a: int`` evaluates obj
+        # Module-scope annotations are evaluated at runtime unless PEP 563. Python
+        # 3.14 defers them (PEP 649), but the kernel may run an older Python, so they
+        # count as reads: at worst an extra edge.
         if not self._future_annotations:
             self.visit(node.annotation)
         if node.value:
@@ -212,9 +230,21 @@ class VariableAnalyzer(ast.NodeVisitor):
             self.visit(base)
         for kw in node.keywords:
             self.visit(kw.value)
+        # The body runs now, in order, in a namespace of its own: a name it reads
+        # before binding it there is a module read. Method bodies are symtable's.
+        body = VariableAnalyzer()
+        body._future_annotations = self._future_annotations
+        body._local_vars = set(self._local_vars)
+        body._in_class = True
+        for stmt in node.body:
+            body.visit(stmt)
         self._local_vars = old_local_vars
+        for name in sorted(body.read_before_define | body.global_reads):
+            self._read(name)
+        for name in body.mutation_defines - body.pure_defines:
+            self.defines.add(name)
+            self.mutation_defines.add(name)
         self._defined_so_far.add(node.name)
-        # Don't recurse into class body
 
     def _visit_function_signature(
         self,
@@ -262,8 +292,8 @@ class VariableAnalyzer(ast.NodeVisitor):
                 self.defines.add(name)
                 self._defined_so_far.add(name)
 
-    def visit_For(self, node: ast.For) -> None:
-        """Handle ``for x in ...``: x is defined at top level."""
+    def visit_For(self, node: ast.For | ast.AsyncFor) -> None:
+        """Handle ``for x in ...`` and ``async for``: x is defined at top level."""
         self._add_assign_target(node.target)
         self.visit(node.iter)
         _collect_name_targets(node.target, self._defined_so_far)
@@ -271,6 +301,8 @@ class VariableAnalyzer(ast.NodeVisitor):
             self.visit(stmt)
         for stmt in node.orelse:
             self.visit(stmt)
+
+    visit_AsyncFor = visit_For
 
     def visit_With(self, node: ast.With) -> None:
         """Handle ``with ... as x``: x is defined at top level."""
@@ -295,15 +327,16 @@ class VariableAnalyzer(ast.NodeVisitor):
             self.visit(stmt)
 
     def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
-        """Handle ``except E as e``: e is defined at top level."""
-        if node.name:
-            self.defines.add(node.name)
+        """Handle ``except E as e``: Python unbinds e when the handler ends, so it is
+        the handler's, like a lambda parameter."""
         if node.type:
             self.visit(node.type)
+        old_local_vars = self._local_vars
         if node.name:
-            self._defined_so_far.add(node.name)
+            self._local_vars = self._local_vars | {node.name}
         for stmt in node.body:
             self.visit(stmt)
+        self._local_vars = old_local_vars
 
     def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
         """Handle: walrus operator := at top level."""
@@ -350,26 +383,23 @@ class VariableAnalyzer(ast.NodeVisitor):
             self._add_delete_target(target)
 
     def _add_delete_target(self, target: ast.expr) -> None:
-        """Add the root name of a ``del`` target (``x``, ``x.attr``, ``x[k]``) to references."""
+        """Read the root of a ``del`` target; ``del x[k]`` and ``del x.a`` mutate x."""
         if isinstance(target, ast.Name):
-            self.references.add(target.id)
+            self._read(target.id)
         elif isinstance(target, (ast.Tuple, ast.List)):
             for elt in target.elts:
                 self._add_delete_target(elt)
         elif isinstance(target, ast.Subscript):
-            self._add_delete_target(target.value)
-            self.visit(target.slice)
+            self._add_reference_target(target)
+            self._add_mutation_define(target.value)
         elif isinstance(target, ast.Attribute):
-            self._add_delete_target(target.value)
+            self._add_reference_target(target.value)
+            self._add_mutation_define(target.value)
 
     def visit_Name(self, node: ast.Name) -> None:
         """Collect referenced names (Load context)."""
         if isinstance(node.ctx, ast.Load):
-            # Skip names local to the current scope (e.g. lambda params)
-            if node.id not in self._local_vars:
-                self.references.add(node.id)
-                if node.id not in self._defined_so_far:
-                    self.read_before_define.add(node.id)
+            self._read(node.id)
 
     def visit_ListComp(self, node: ast.ListComp) -> None:
         """``[elt for x in iter if cond]``: loop targets are local; the first iter is outer."""
@@ -406,6 +436,11 @@ class VariableAnalyzer(ast.NodeVisitor):
         self.visit(node.generators[0].iter)
 
         old_local_vars = self._local_vars
+        old_deferred, old_global = self._deferred, self._global_scope
+        # A generator's elements run when it is iterated, not now.
+        self._deferred = old_deferred or isinstance(node, ast.GeneratorExp)
+        # In a class body, the rest cannot see the class's names: they are globals.
+        self._global_scope = old_global or self._in_class
         try:
             local_vars = set(self._local_vars)
             for gen in node.generators:
@@ -424,6 +459,7 @@ class VariableAnalyzer(ast.NodeVisitor):
                     self.visit(cond)
         finally:
             self._local_vars = old_local_vars
+            self._deferred, self._global_scope = old_deferred, old_global
 
     def _extract_target_names(self, target: ast.expr) -> set[str]:
         """Names bound by a comprehension or for-loop target."""
@@ -438,32 +474,12 @@ class VariableAnalyzer(ast.NodeVisitor):
         return names
 
     def visit_Lambda(self, node: ast.Lambda) -> None:
-        """Lambda expression: arguments are local scope."""
-        # Defaults evaluate in the enclosing scope, before params shadow.
+        """Lambda: its defaults run now; its body runs later, like a def body (symtable's)."""
         for default in node.args.defaults:
             self.visit(default)
         for default in node.args.kw_defaults:
             if default is not None:
                 self.visit(default)
-        old_local_vars = self._local_vars
-        self._local_vars = self._local_vars | self._get_lambda_params(node.args)
-        self.visit(node.body)
-        self._local_vars = old_local_vars
-
-    def _get_lambda_params(self, args: ast.arguments) -> set[str]:
-        """Extract parameter names from lambda arguments."""
-        params = set()
-        for arg in args.posonlyargs:
-            params.add(arg.arg)
-        for arg in args.args:
-            params.add(arg.arg)
-        if args.vararg:
-            params.add(args.vararg.arg)
-        for arg in args.kwonlyargs:
-            params.add(arg.arg)
-        if args.kwarg:
-            params.add(args.kwarg.arg)
-        return params
 
     def _add_assign_target(self, target: ast.expr) -> None:
         """Add the names an assignment target defines.
@@ -480,8 +496,8 @@ class VariableAnalyzer(ast.NodeVisitor):
         elif isinstance(target, ast.Subscript):
             # df["col"] = ...: reads df and produces the mutated df, so
             # downstream reads route through this cell (else they can run
-            # before the mutation and KeyError).
-            self._add_reference_target(target.value)
+            # before the mutation and KeyError). The index is read too.
+            self._add_reference_target(target)
             self._add_mutation_define(target.value)
         elif isinstance(target, ast.Attribute):
             # obj.attr = ...: same as subscript mutation.
@@ -491,11 +507,16 @@ class VariableAnalyzer(ast.NodeVisitor):
             self._add_assign_target(target.value)
 
     def _add_reference_target(self, node: ast.expr) -> None:
-        """Add the root name of an attribute/subscript mutation to references."""
+        """Read the root name of an attribute/subscript target, and every index on the way."""
         if isinstance(node, ast.Name):
-            self.references.add(node.id)
-        elif isinstance(node, (ast.Attribute, ast.Subscript)):
+            self._read(node.id)
+        elif isinstance(node, ast.Attribute):
             self._add_reference_target(node.value)
+        elif isinstance(node, ast.Subscript):
+            self._add_reference_target(node.value)
+            self.visit(node.slice)
+        else:
+            self.visit(node)  # ``f()[k] = 1`` reads what f() reads
 
     def _add_mutation_define(self, node: ast.expr) -> None:
         """Record the root name of a mutated target as a define.
@@ -511,102 +532,165 @@ class VariableAnalyzer(ast.NodeVisitor):
             self._add_mutation_define(node.value)
 
 
-def _collect_body_refs(source: str) -> set[str]:
-    """Names referenced inside function/class bodies that resolve via module globals.
+class _Synchronous(ast.NodeTransformer):
+    """Module-level ``await``, ``async for``, ``async with`` and async comprehensions
+    made synchronous, which changes no scope. Python 3.14's symtable refuses them."""
 
-    The AST visitor stops at body boundaries; ``symtable`` does the real scope
-    analysis. The caller filters builtins, privates and defines.
+    def visit_FunctionDef(self, node: ast.AST) -> ast.AST:
+        return node  # an async def's body may await
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+    visit_Lambda = visit_FunctionDef
+
+    def visit_Await(self, node: ast.Await) -> ast.AST:
+        return self.visit(node.value)
+
+    def visit_AsyncFor(self, node: ast.AsyncFor) -> ast.AST:
+        self.generic_visit(node)
+        loop = ast.For(target=node.target, iter=node.iter, body=node.body, orelse=node.orelse)
+        return ast.copy_location(loop, node)
+
+    def visit_AsyncWith(self, node: ast.AsyncWith) -> ast.AST:
+        self.generic_visit(node)
+        return ast.copy_location(ast.With(items=node.items, body=node.body), node)
+
+    def visit_comprehension(self, node: ast.comprehension) -> ast.AST:
+        self.generic_visit(node)
+        node.is_async = 0
+        return node
+
+
+def _symbol_tables(source: str, tree: ast.Module) -> list[symtable.SymbolTable]:
+    """The module's symbol table, or one per top-level statement when it is refused.
+
+    A function's scopes depend only on the functions around it, all in the same
+    top-level statement, so the per-statement tables give the same answers.
     """
     try:
-        root = symtable.symtable(source, "<cell>", "exec")
+        return [symtable.symtable(source, "<cell>", "exec")]
     except SyntaxError:
-        return set()
+        pass
+    lines = source.splitlines()
+    tables = []
+    for stmt in tree.body:
+        decorators = getattr(stmt, "decorator_list", [])
+        first = min([stmt.lineno, *(d.lineno for d in decorators)])
+        assert stmt.end_lineno is not None
+        segment = "\n".join(lines[first - 1 : stmt.end_lineno])
+        try:
+            tables.append(symtable.symtable(segment, "<cell>", "exec"))
+            continue
+        except SyntaxError:
+            pass
+        try:
+            sync = _deeply(lambda: ast.unparse(_Synchronous().visit(ast.parse(segment))))
+            tables.append(symtable.symtable(sync, "<cell>", "exec"))
+        except (SyntaxError, RecursionError, ValueError):
+            continue  # nothing this statement's bodies read is known
+    return tables
 
+
+def _body_refs(tables: list[symtable.SymbolTable]) -> set[str]:
+    """Names read in function, lambda and class bodies that resolve to module globals.
+
+    A symbol does iff it is referenced, ``is_global()``, and not local, a parameter
+    or a closure variable (``is_free()`` resolves via enclosing scopes). The caller
+    filters builtins, privates and defines.
+    """
     refs: set[str] = set()
-    for child in root.get_children():
-        _walk_body(child, refs)
+    stack = [child for table in tables for child in table.get_children()]
+    while stack:
+        scope = stack.pop()
+        for sym in scope.get_symbols():
+            if (
+                sym.is_referenced()
+                and sym.is_global()
+                and not sym.is_local()
+                and not sym.is_parameter()
+                and not sym.is_free()
+            ):
+                refs.add(sym.get_name())
+        stack.extend(scope.get_children())
     return refs
 
 
-def _walk_body(scope: symtable.SymbolTable, refs: set[str]) -> None:
-    """Recursively collect names that fall through to module globals.
-
-    A symbol does iff it is referenced, ``is_global()``, and not local, a
-    parameter or a closure variable (``is_free()`` resolves via enclosing scopes).
-    """
-    for sym in scope.get_symbols():
-        if (
-            sym.is_referenced()
-            and sym.is_global()
-            and not sym.is_local()
-            and not sym.is_parameter()
-            and not sym.is_free()
-        ):
-            refs.add(sym.get_name())
-    for inner in scope.get_children():
-        _walk_body(inner, refs)
-
-
-def _collect_global_writes(source: str) -> tuple[set[str], set[str]]:
+def _global_writes(tables: list[symtable.SymbolTable]) -> tuple[set[str], set[str]]:
     """Names a function binds at module scope through ``global X; X = ...``.
 
-    The AST visitor only sees module-level defines, so it misses these.
-
-    Returns ``(writes, writes_with_reads)``; the second subset is also read in
-    the function and stays in references, so the DAG records the cell as both
-    consumer and producer. A bare ``global X`` without an assign, and
-    ``nonlocal``, bind nothing at module scope and are skipped.
+    Returns ``(writes, writes_with_reads)``; the second are also read in the function
+    and stay in references. A bare ``global X`` and ``nonlocal`` bind nothing here.
     """
-    try:
-        root = symtable.symtable(source, "<cell>", "exec")
-    except SyntaxError:
-        return set(), set()
     writes: set[str] = set()
     read_writes: set[str] = set()
-    for child in root.get_children():
-        _walk_global_writes(child, writes, read_writes)
+    stack = [child for table in tables for child in table.get_children()]
+    while stack:
+        scope = stack.pop()
+        for sym in scope.get_symbols():
+            if sym.is_assigned() and sym.is_declared_global():
+                writes.add(sym.get_name())
+                if sym.is_referenced():
+                    read_writes.add(sym.get_name())
+        stack.extend(scope.get_children())
     return writes, read_writes
 
 
-def _walk_global_writes(
-    scope: symtable.SymbolTable,
-    writes: set[str],
-    read_writes: set[str],
-) -> None:
-    for sym in scope.get_symbols():
-        if sym.is_assigned() and sym.is_declared_global():
-            writes.add(sym.get_name())
-            if sym.is_referenced():
-                read_writes.add(sym.get_name())
-    for inner in scope.get_children():
-        _walk_global_writes(inner, writes, read_writes)
+def _global_augmented(tree: ast.Module) -> set[str]:
+    """Names a function declares ``global`` and updates with ``x += ...``.
+
+    symtable does not count an augmented target as referenced, but it is read.
+    """
+    found: set[str] = set()
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        declared: set[str] = set()
+        augmented: set[str] = set()
+        stack: list[ast.AST] = list(fn.body)
+        while stack:
+            node = stack.pop()
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+                continue  # its own scope, walked on its own
+            if isinstance(node, ast.Global):
+                declared.update(node.names)
+            elif isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
+                augmented.add(node.target.id)
+            stack.extend(ast.iter_child_nodes(node))
+        found |= declared & augmented
+    return found
 
 
-def analyze_cell(source: str) -> CellAnalysis:
+_BUILTIN_NAMES = frozenset(dir(builtins)) | {"__name__", "__file__", "__doc__", "__package__"}
+
+
+def analyze_cell(source: str) -> CellNames:
     """Analyze a cell's source and extract its defines and references."""
     if not source or not source.strip():
-        return CellAnalysis(defines=[], references=[])
+        return CellNames(defines=[], references=[])
 
     try:
         tree = ast.parse(source)
     except SyntaxError as e:
-        return CellAnalysis(
-            defines=[],
-            references=[],
-            error=f"Syntax error: {e.msg}",
-        )
+        return CellNames(defines=[], references=[], error=f"Syntax error: {e.msg}")
+    except (RecursionError, MemoryError):
+        return CellNames(too_deep=True)
 
-    # The visitor stops at function/class bodies; symtable covers those.
+    # The visitor stops at function, lambda and generator bodies; symtable covers those.
     analyzer = VariableAnalyzer()
-    analyzer.visit(tree)
+    try:
+        _deeply(analyzer.visit, tree)
+    except RecursionError:
+        return CellNames(too_deep=True)
 
-    nested_refs = _collect_body_refs(source)
+    tables = _symbol_tables(source, tree)
+    nested_refs = _body_refs(tables)
 
     # ``global`` writes inside functions are module defines too.
     # ``global_read_writes`` are also read there, so they stay in references.
-    global_writes, global_read_writes = _collect_global_writes(source)
+    global_writes, global_read_writes = _global_writes(tables)
+    augmented = _global_augmented(tree)
+    global_read_writes |= augmented
+    nested_refs |= augmented
 
-    builtin_names = set(dir(builtins)) | {"__name__", "__file__", "__doc__", "__package__"}
     defines = [v for v in (analyzer.defines | global_writes) if not v.startswith("_")]
     # A pure assignment in the same cell supersedes a mutation-define.
     effective_mutation_defines = {
@@ -621,22 +705,18 @@ def analyze_cell(source: str) -> CellAnalysis:
     references = [
         v
         for v in combined_refs
-        if not v.startswith("_") and v not in builtin_names and v not in pure_defined_names
+        if not v.startswith("_") and v not in _BUILTIN_NAMES and v not in pure_defined_names
     ]
     builtin_references = [
         v
         for v in combined_refs
-        if not v.startswith("_") and v in builtin_names and v not in pure_defined_names
+        if not v.startswith("_") and v in _BUILTIN_NAMES and v not in pure_defined_names
     ]
 
-    defines = sorted(set(defines))
-    references = sorted(set(references))
-    mutation_defines = sorted(effective_mutation_defines)
-
-    return CellAnalysis(
-        defines=defines,
-        references=references,
-        mutation_defines=mutation_defines,
+    return CellNames(
+        defines=sorted(set(defines)),
+        references=sorted(set(references)),
+        mutation_defines=sorted(effective_mutation_defines),
         builtin_references=sorted(set(builtin_references)),
         error=None,
     )
@@ -648,14 +728,16 @@ _MEMO_SIZE = 4096
 
 
 @functools.lru_cache(maxsize=_MEMO_SIZE)
-def _analyzed(source: str) -> CellAnalysis:
+def _analyzed(source: str) -> CellNames:
     return analyze_cell(source)
 
 
 def normalize(source: str) -> str:
     """Canonical text for *source*: its AST round trip, so comments and layout drop out.
 
-    Source that does not parse falls back to the line strip, which keeps comments.
+    Source that does not parse, or that the round trip cannot write back (nested too
+    deep, an integer too long for ``str``), falls back to the line strip, which
+    keeps comments.
     """
     return _normalized(source)
 
@@ -663,8 +745,8 @@ def normalize(source: str) -> str:
 @functools.lru_cache(maxsize=_MEMO_SIZE)
 def _normalized(source: str) -> str:
     try:
-        return ast.unparse(ast.parse(source))
-    except SyntaxError:
+        return _deeply(lambda: ast.unparse(ast.parse(source)))
+    except (SyntaxError, RecursionError, ValueError, MemoryError):
         lines = [line.rstrip() for line in source.splitlines()]
         return "\n".join(lines).strip()
 
@@ -677,12 +759,24 @@ class PythonAnalyzer:
     def analyze(self, cell: Cell) -> Analyzed:
         # Memoized: the lists are copied, so the caller may change its own.
         result = _analyzed(cell.source)
+        diagnostics = []
+        if result.too_deep:
+            diagnostics.append(
+                Diagnostic(
+                    "python_too_deep",
+                    Severity.ERROR,
+                    "the cell nests deeper than the analyzer can walk, so its names are "
+                    "unknown; split the expression",
+                    cell.id,
+                )
+            )
         return Analyzed(
             defines=list(result.defines),
             references=list(result.references),
             builtin_references=list(result.builtin_references),
             mutation_defines=list(result.mutation_defines),
             error=result.error,
+            diagnostics=diagnostics,
         )
 
     def normalize(self, body: str) -> str:

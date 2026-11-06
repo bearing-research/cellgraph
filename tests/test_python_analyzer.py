@@ -109,8 +109,9 @@ class TestAnalyzerAssignmentTypes:
         assert result.defines == ["x"]
 
     def test_annotated_assignment_no_value(self):
+        # A bare annotation binds nothing, so a later cell reading x would fail.
         result = analyze_cell("x: int")
-        assert result.defines == ["x"]
+        assert result.defines == []
 
 
 class TestAnalyzerDefinitions:
@@ -263,9 +264,10 @@ class TestAnalyzerPrivateVariables:
         assert result.defines == []
 
     def test_single_underscore_excluded(self):
+        # ``_`` is the cell's own, but the right-hand side still runs and reads.
         result = analyze_cell("_ = unused")
         assert result.defines == []
-        assert result.references == []  # unused is not defined
+        assert result.references == ["unused"]
 
 
 class TestAnalyzerLoopsAndContextManagers:
@@ -285,8 +287,9 @@ class TestAnalyzerLoopsAndContextManagers:
         assert result.references == []
 
     def test_except_handler_variable(self):
+        # Python unbinds e when the handler ends.
         result = analyze_cell("try:\n    pass\nexcept Exception as e:\n    pass")
-        assert result.defines == ["e"]
+        assert result.defines == []
 
     def test_async_with_statement(self):
         result = analyze_cell("async with async_ctx() as x:\n    pass")
