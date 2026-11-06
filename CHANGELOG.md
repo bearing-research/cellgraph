@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- The Python analyzer finds more of what a cell reads and binds (#21):
+  - A class-body annotation or type alias finds the class's own names first. On
+    Python 3.14 `class M:` with `class Inner` and `inner: Inner` read `Inner`
+    upstream, and on any Python so did `type A = T` for a class-level `T`. So
+    does one in a type parameter scope (`type A[U] = T`), and a name the class
+    deleted is read from the module.
+  - A comprehension's `if` runs before its element, so a walrus there binds
+    first: `[y for x in a if (y := x)]` no longer reads `y` upstream, and
+    `[y := f(x) for x in a if y]` does.
+  - `global np` and then `import numpy as np` in a function defines `np`, and a
+    `global x` the function only deletes defines nothing, whatever a scope
+    without `global x` binds.
+  - An unconditional `del` in a class body unbinds the name there, as at module
+    level, so a later read in the body is the module's.
+
 - Execution keys count what each upstream makes, and every output component is
   tagged (#20):
   - An output a cell does not read is keyed as its upstream makes it, a sweep
