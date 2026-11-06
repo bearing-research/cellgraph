@@ -13,6 +13,9 @@
     provenance attestation for each (`gh attestation verify`). The release is a
     draft until its assets are attached, so it works with immutable releases.
   - No checkout keeps its token in `.git/config`.
+  - docs/api.md says how deep a cell can nest before it is `python_too_deep`
+    depends on the Python: before 3.14, Windows parses about 3000 levels, Linux
+    and macOS past 8000. The tests stay under it.
 
 - Hosts build input components the way cellgraph does (#18):
   - `input_component(kind, name, resolved)` is the component `execution_key` puts

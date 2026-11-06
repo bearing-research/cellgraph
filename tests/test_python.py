@@ -183,27 +183,39 @@ def test_names(source, defines, references, mutations):
     assert names(source) == (defines, references, mutations)
 
 
+# Each ``+`` nests the tree a level, and the walk takes two frames a level: past the
+# default recursion limit, so the retry runs. Parsing recurses in C, under a limit of
+# 3000 levels on Windows before 3.14, so a deeper cell is python_too_deep there.
+DEEP = 2000
+
+
 def test_a_long_expression_is_analyzed():
-    # Each ``+`` nests the tree one level, past the default recursion limit.
-    deep = "x = " + " + ".join(["a"] * 3000)
+    deep = "x = " + " + ".join(["a"] * DEEP)
     assert names(deep) == (["x"], ["a"], [])
     assert normalize(deep) == deep
 
 
 def test_the_deep_retry_starts_afresh():
     # The first walk fails inside the handler; a reused analyzer would keep e local.
-    deep = " + ".join(["a"] * 3000)
+    deep = " + ".join(["a"] * DEEP)
     source = f"try:\n    pass\nexcept E as e:\n    w = {deep}\nprint(e)"
     assert analyze_cell(source).references == ["E", "a", "e"]
 
 
 def test_deep_cells_on_threads_leave_the_recursion_limit_alone():
     limit = sys.getrecursionlimit()
-    sources = [f"x{i} = " + " + ".join(["a"] * 3000) for i in range(8)]
+    sources = [f"x{i} = " + " + ".join(["a"] * DEEP) for i in range(8)]
     with ThreadPoolExecutor(max_workers=8) as pool:
         results = list(pool.map(analyze_cell, sources))
     assert all(r.references == ["a"] for r in results)
     assert sys.getrecursionlimit() == limit
+
+
+def test_a_cell_past_what_python_parses_is_too_deep():
+    past = "x = " + " + ".join(["a"] * 200_000)
+    analysis = cg.analyze([cg.Cell("a", past)], cg.Vocabulary.core())
+    assert [d.code for d in analysis.diagnostics] == ["python_too_deep"]
+    assert not analysis.cells["a"].plannable
 
 
 def test_a_cell_symtable_refuses_warns_that_its_bodies_are_unread():
