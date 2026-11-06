@@ -272,3 +272,32 @@ def test_a_cell_too_deep_to_walk_is_a_diagnostic_not_a_crash(monkeypatch):
 def test_normalize_survives_what_unparse_refuses():
     huge = "x = 0x" + "f" * 5000
     assert normalize(huge) == huge
+
+
+def test_a_line_python_does_not_break_is_one_line_of_the_key():
+    # The two differ to Python: a comment, or a string with a line separator in it.
+    for one, two in [
+        ("# note\x0cx = 1", "# note\nx = 1"),
+        ('s = """a\u2028b"""', 's = """a\nb"""'),
+    ]:
+        a = cg.analyze([cg.Cell("p", one), cg.Cell("q", two)], cg.Vocabulary.core())
+        assert a.cells["p"].definition_key != a.cells["q"].definition_key
+
+
+def test_the_fallback_keeps_the_first_lines_indentation():
+    assert normalize("  x = 1") != normalize("x = 1")
+
+
+def test_a_lone_surrogate_is_a_syntax_error_not_a_crash():
+    # A truncated emoji in a notebook file leaves one.
+    analysis = cg.analyze([cg.Cell("a", 'x = "\ud800"')], cg.Vocabulary.core())
+    assert [d.code for d in analysis.diagnostics] == ["syntax_error"]
+    assert analysis.cells["a"].definition_key is not None
+
+
+def test_a_member_too_deep_to_parse_is_python_too_deep():
+    deep = "# @variant g a\nx = " + "-" * 200_000 + "1"
+    analysis = cg.analyze(
+        [cg.Cell("a", deep), cg.Cell("b", "# @variant g b\nx = 2")], cg.Vocabulary.core()
+    )
+    assert "python_too_deep" in [d.code for d in analysis.diagnostics]

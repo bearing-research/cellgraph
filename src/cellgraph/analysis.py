@@ -421,7 +421,8 @@ def _naming_line(directives: list[Directive], key: str, token: str) -> int | Non
 def _top_level_imports(source: str) -> set[str]:
     try:
         tree = ast.parse(source)
-    except SyntaxError:
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        # A member another language's, or past what the parser takes, imports nothing.
         return set()
     names: set[str] = set()
     for node in tree.body:

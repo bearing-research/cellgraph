@@ -14,6 +14,19 @@ import re
 from collections.abc import Container, Iterator
 from dataclasses import dataclass
 
+# Where Python breaks a line. ``str.splitlines`` also breaks at a form feed, \x1c to
+# \x1e, \x85, \u2028 and \u2029, which Python keeps inside a line, a comment or a
+# string.
+_LINE_BREAK = re.compile(r"\r\n|\r|\n")
+
+
+def source_lines(source: str) -> list[str]:
+    """*source*'s lines, split as Python splits them; like ``splitlines`` otherwise."""
+    lines = _LINE_BREAK.split(source)
+    if lines[-1] == "":
+        lines.pop()
+    return lines
+
 
 @dataclass(frozen=True)
 class Directive:
@@ -91,7 +104,7 @@ class Grammar:
         The block is the first contiguous run of blank lines and lines that start
         with the marker; blank lines are not yielded.
         """
-        for lineno, line in enumerate(source.splitlines(), start=1):
+        for lineno, line in enumerate(source_lines(source), start=1):
             stripped = line.strip()
             if not stripped:
                 continue
@@ -117,7 +130,7 @@ class Grammar:
 
     def strip(self, source: str) -> str:
         """Return *source* with the leading comment block removed."""
-        lines = source.splitlines()
+        lines = source_lines(source)
         for i, line in enumerate(lines):
             stripped = line.strip()
             if not stripped or stripped.startswith(self.marker):
@@ -131,7 +144,7 @@ class Grammar:
         With *keys*, only those keys' lines go. Other comments stay: they are the
         body's, for its normalizer to judge.
         """
-        lines = source.splitlines()
+        lines = source_lines(source)
         end = self._block_end(lines)
 
         def is_directive(line: str) -> bool:
@@ -150,7 +163,7 @@ class Grammar:
         key = key.lower()
         new_line = self._format(key, value)
         sep = self._line_sep(source)
-        lines = source.splitlines()
+        lines = source_lines(source)
         end = self._block_end(lines)
 
         matches = [i for i in range(end) if (d := self.parse_directive(lines[i])) and d[0] == key]
@@ -169,7 +182,7 @@ class Grammar:
         """Return *source* with every ``<marker> @key`` directive removed from the block."""
         key = key.lower()
         sep = self._line_sep(source)
-        lines = source.splitlines()
+        lines = source_lines(source)
         end = self._block_end(lines)
         kept = [
             line

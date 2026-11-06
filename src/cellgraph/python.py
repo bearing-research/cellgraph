@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from cellgraph.diagnostics import Diagnostic, Severity
-from cellgraph.languages import Analyzed
+from cellgraph.languages import Analyzed, strip_lines
 
 if TYPE_CHECKING:
     from cellgraph.analysis import Cell
@@ -872,6 +872,9 @@ def analyze_cell(source: str) -> CellNames:
         tree = ast.parse(source)
     except SyntaxError as e:
         return CellNames(defines=[], references=[], error=f"Syntax error: {e.msg}")
+    except UnicodeEncodeError:
+        # A lone surrogate, as a truncated emoji in a notebook file leaves.
+        return CellNames(defines=[], references=[], error="Syntax error: not UTF-8 text")
     except (RecursionError, MemoryError):
         return CellNames(too_deep=True)
 
@@ -958,8 +961,7 @@ def _normalized(source: str) -> str:
     try:
         return _deeply(lambda: ast.unparse(ast.parse(source)))
     except (SyntaxError, RecursionError, ValueError, MemoryError):
-        lines = [line.rstrip() for line in source.splitlines()]
-        return "\n".join(lines).strip()
+        return strip_lines(source)
 
 
 class PythonAnalyzer:

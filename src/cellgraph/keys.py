@@ -35,7 +35,8 @@ def derive_subkey(parent_hash: str, *labels: str) -> str:
     for label in labels:
         if ":" in label:
             raise ValueError(f"label {label!r} contains ':', the label separator")
-    return hashlib.sha256(":".join([parent_hash, *labels]).encode()).hexdigest()
+    text = ":".join([parent_hash, *labels])
+    return hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()
 
 
 # json writes an int of up to 640 digits under every int_max_str_digits setting.
@@ -88,7 +89,8 @@ def input_component(kind: str, name: str, resolved: Resolved) -> str:
 
 
 def _sha256(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    # surrogatepass: a lone surrogate (a truncated emoji) is hashed, distinctly.
+    return hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()
 
 
 # --- what the host supplies -------------------------------------------------------

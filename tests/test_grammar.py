@@ -2,7 +2,7 @@ import re
 
 import pytest
 
-from cellgraph.grammar import GRAMMAR, Directive, Grammar
+from cellgraph.grammar import GRAMMAR, Directive, Grammar, source_lines
 
 
 def test_the_block_ends_at_the_first_body_line():
@@ -148,3 +148,12 @@ def test_a_subclass_regex_and_init_work_as_before():
 
     assert OwnInit().directives("# @name x\ny = 1") == [Directive("name", "x", 1)]
     assert OwnInit().with_marker("--").directives("-- @a 1") == [Directive("a", "1", 1)]
+
+
+@pytest.mark.parametrize("brk", ["\x0c", "\x1c", "\x85", "\u2028", "\u2029"])
+def test_a_line_breaks_only_where_python_breaks_it(brk):
+    # To Python, each of these is inside a line: the directive is all one comment.
+    source = f"# @a 1{brk}x = 1\ny = 2"
+    assert [d.line for d in GRAMMAR.directives(source)] == [1]
+    assert GRAMMAR.strip_directives(source) == "y = 2"
+    assert source_lines("a\r\nb\rc\nd\n") == ["a", "b", "c", "d"]

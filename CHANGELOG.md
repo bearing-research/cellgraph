@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- `analyze` stays up on odd text, and keys it apart (#22):
+  - Lines break only at `\n`, `\r\n` and `\r`, as in Python. A form feed,
+    `\u2028` and the others `str.splitlines` also breaks at stay inside the line,
+    so `# note\x0cx = 1` (one comment) and `# note\nx = 1` no longer share a
+    definition key, nor two strings that differ by one of them.
+  - A lone surrogate, as a truncated emoji in a notebook file leaves, is a
+    `syntax_error` in Python and is hashed in any language, where `analyze`
+    raised `UnicodeEncodeError`.
+  - A variant member too deep to parse is `python_too_deep`, where `analyze`
+    raised `MemoryError`.
+  - `strip_lines`, and Python's fallback for source it cannot parse, keep the
+    first line's indentation, as documented, so `"  x = 1"` (an error) and
+    `"x = 1"` no longer share a key.
+
 - The Python analyzer finds more of what a cell reads and binds (#21):
   - A class-body annotation or type alias finds the class's own names first. On
     Python 3.14 `class M:` with `class Inner` and `inner: Inner` read `Inner`

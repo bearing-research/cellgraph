@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol
 
 from cellgraph.diagnostics import Diagnostic
-from cellgraph.grammar import check_marker
+from cellgraph.grammar import check_marker, source_lines
 
 if TYPE_CHECKING:
     from cellgraph.analysis import Cell
@@ -78,8 +78,9 @@ def comment_marker(analyzer: LanguageAnalyzer) -> str:
 
 def strip_lines(source: str) -> str:
     """A ready-made normalizer: trailing whitespace per line, and outer blank lines, dropped."""
-    lines = [line.rstrip() for line in source.splitlines()]
-    return "\n".join(lines).strip()
+    lines = [line.rstrip() for line in source_lines(source)]
+    # Blank lines only: the first line's indentation is the text's.
+    return "\n".join(lines).strip("\n")
 
 
 class UnknownLanguageError(LookupError):

@@ -16,7 +16,9 @@ Cell(id, source, language="python", meta={})
 
 A cell's directives are its leading block of comment lines that read
 `# @key value`. Blank lines and other comments may sit in the block, and the block
-ends at the first line of body. Keys are lower-cased and values stripped.
+ends at the first line of body. Keys are lower-cased and values stripped. Lines
+break where Python breaks them, at `\n`, `\r\n` or `\r`: a form feed or `\u2028`
+is inside a line, as it is in a Python comment or string.
 
 The comment marker is the cell language's: `#` by default, and whatever its
 analyzer declares as `comment` otherwise (see Languages). The marker replaces `#`
