@@ -10,8 +10,7 @@ planned and why the others cannot, and keys each cell: a definition key from its
 normalized source and the annotations that change what it computes, and an
 execution key from the outputs and external inputs the host looks up. The
 package has no dependencies and runs nothing; the host executes, stores and
-resolves. It was factored out of Strata's notebook, its first host, whose
-formats it reproduces exactly under `legacy-1`.
+resolves. It was factored out of Strata's notebook, its first host.
 
 ```bash
 pip install cellgraph

@@ -44,11 +44,6 @@ from cellgraph.languages import (
 )
 from cellgraph.vocabulary import AnnotationError, Partial, ValidationContext, Vocabulary
 
-NORMALIZE_LEGACY_1 = "legacy-1"
-NORMALIZE_CELLGRAPH_1 = "cellgraph-1"
-DIGEST_LEGACY_1 = "legacy-1"
-DIGEST_CELLGRAPH_1 = "cellgraph-1"
-
 # Diagnostics that make a structural error: the cell is on a cycle or in a collision.
 STRUCTURAL_CODES = frozenset({"cycle", "variant_collision"})
 
@@ -516,8 +511,9 @@ def _names_phase(ca: CellAnalysis, analyzed: Analyzed) -> None:
 
     for effect in ca.effects:
         if isinstance(effect, FanOut) and effect.over is not None:
-            # An instance's key leaves the source out, so the body must not read it whole.
-            if effect.over in analyzed.references:
+            # An instance's key leaves the source out, so the cell must not read it whole:
+            # not in its body (a builtin's name included), nor through a Reads effect.
+            if effect.over in {*analyzed.references, *analyzed.builtin_references, *read}:
                 ca.error(
                     "each_reads_source",
                     f"the cell reads `{effect.over}` itself, which every item's result would "
@@ -1026,8 +1022,6 @@ class Analysis:
     vocabulary: Vocabulary
     analyzers: dict[str, LanguageAnalyzer]
     groups: GroupConfig
-    normalization: str
-    digest: str
 
     @property
     def diagnostics(self) -> list[Diagnostic]:
@@ -1077,8 +1071,6 @@ def analyze(
     cells: Iterable[Cell],
     vocabulary: Vocabulary,
     groups: GroupConfig | None = None,
-    normalization: str = NORMALIZE_LEGACY_1,
-    digest: str = DIGEST_LEGACY_1,
     strict: bool = False,
     *,
     analyzers: Mapping[str, LanguageAnalyzer] | None = None,
@@ -1092,10 +1084,6 @@ def analyze(
     """
     from cellgraph.keys import definition_key
 
-    if normalization not in (NORMALIZE_LEGACY_1, NORMALIZE_CELLGRAPH_1):
-        raise ValueError(f"unknown normalization {normalization!r}")
-    if digest not in (DIGEST_LEGACY_1, DIGEST_CELLGRAPH_1):
-        raise ValueError(f"unknown digest {digest!r}")
     table = dict(analyzers) if analyzers is not None else registered_analyzers()
     groups = groups or GroupConfig()
     cell_list = list(cells)
@@ -1161,8 +1149,6 @@ def analyze(
         vocabulary=vocabulary,
         analyzers=table,
         groups=groups,
-        normalization=normalization,
-        digest=digest,
     )
     for ca in analyses:
         ca.normalized, ca.definition_key = definition_key(analysis, ca)

@@ -1,31 +1,28 @@
 """The definition key and the execution key (design 4.2, 4.3, 7).
 
-Two independent axes: the **normalization** decides the text a definition key is
-built from, the **digest** decides the bytes hashed. ``legacy-1`` on both is
-Strata's format, byte for byte; ``cellgraph-1`` folds the format name into
-canonical JSON.
-
-``execution_key`` returns ``Keyed``, ``Unavailable`` or ``HostKeyed``, each with
-``parts``: the key's components by stable address, versioned by
-``PARTS_SCHEMA`` apart from the digest format (13.1).
+The definition key hashes the cell's language, its body without directive lines as
+the language normalizes it, and its key fields. ``execution_key`` returns ``Keyed``,
+``Unavailable`` or ``HostKeyed``, each with ``parts``: the key's components by stable
+address, versioned by ``PARTS_SCHEMA``. A key is ``parts_digest(parts)``, so what
+``parts`` shows is exactly what the key covers.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from cellgraph import python
 from cellgraph.effects import Input
 from cellgraph.languages import directive_keys
 
 if TYPE_CHECKING:
     from cellgraph.analysis import Analysis, CellAnalysis
 
-PARTS_SCHEMA = 1
+PARTS_SCHEMA = 2
 
 
 def derive_subkey(parent_hash: str, *labels: str) -> str:
@@ -39,23 +36,37 @@ def derive_subkey(parent_hash: str, *labels: str) -> str:
     return hashlib.sha256(":".join([parent_hash, *labels]).encode()).hexdigest()
 
 
-def compute_provenance_hash(inputs: list[str], source_hash: str, env_hash: str) -> str:
-    """The legacy execution digest: sorted inputs, the source hash and the env hash."""
-    hasher = hashlib.sha256()
-    for component in sorted(inputs):
-        hasher.update(component.encode("utf-8"))
-        hasher.update(b"\x00")
-    hasher.update(source_hash.encode("utf-8"))
-    hasher.update(b"\x00")
-    hasher.update(env_hash.encode("utf-8"))
-    return hasher.hexdigest()
-
-
 def canonical_json(value: Any) -> str:
-    """Sorted keys, no whitespace, UTF-8 as is, no NaN."""
+    """Sorted keys, no whitespace, UTF-8 as is; NaN, infinity and non-str keys refused.
+
+    ``json`` would write ``{1: "a"}`` as ``{"1": "a"}``, so two values would share a key.
+    """
+    _check_json(value)
     return json.dumps(
         value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
     )
+
+
+def _check_json(value: Any) -> None:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError(f"a canonical JSON key must be a str, not {key!r}")
+            _check_json(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            _check_json(item)
+    elif isinstance(value, float) and not math.isfinite(value):
+        raise ValueError(f"canonical JSON has no {value!r}")
+
+
+def parts_digest(parts: Mapping[str, Any]) -> str:
+    """The key of *parts*: ``sha256(canonical_json(parts))``.
+
+    A host keying a ``HostKeyed`` cell adds its own components to ``parts`` and calls
+    this, so its keys are built the way cellgraph builds its own.
+    """
+    return _sha256(canonical_json(dict(parts)))
 
 
 def _sha256(text: str) -> str:
@@ -120,13 +131,12 @@ class Item:
 class Resolved:
     """A resolver's answer for one input.
 
-    ``identity`` names what is read and ``fingerprint`` its current content; under
-    the ``legacy-1`` digest the component is ``legacy``, the host's own string.
+    ``identity`` names what is read and ``fingerprint`` its current content; both must
+    be canonical JSON values.
     """
 
     identity: Any
     fingerprint: Any
-    legacy: str | None = None
 
 
 # --- what execution_key returns ---------------------------------------------------
@@ -157,10 +167,12 @@ class HostKeyed:
     """The host computes this cell's key (``owns_key=False``).
 
     ``parts`` holds the upstream components the cell reads, as a key would, and no
-    inputs: those are the host's to key.
+    inputs: those are the host's to key. ``unresolved`` is the addresses that could not
+    be read; with any, the host has no sound key either.
     """
 
     parts: dict[str, Any] | None = None
+    unresolved: tuple[str, ...] = ()
 
 
 # --- the definition key -----------------------------------------------------------
@@ -168,21 +180,13 @@ class HostKeyed:
 
 def definition_key(analysis: Analysis, cell: CellAnalysis) -> tuple[str, str]:
     """``(normalized text, definition key)`` for *cell*."""
-    if analysis.normalization == "legacy-1":
-        # Strata's compute_source_hash body: the whole source, whatever the language.
-        normalized = python.normalize(cell.source)
-    else:
-        analyzer = analysis.analyzers[cell.language]
-        grammar = analysis.vocabulary.grammar_for(analyzer)
-        body = grammar.strip_directives(cell.source, keys=directive_keys(analyzer))
-        normalized = analyzer.normalize(body)
-    fields = cell.key_fields
-    if analysis.digest == "legacy-1":
-        text = normalized
-        if fields:
-            text += "\x00" + json.dumps(fields, sort_keys=True, separators=(",", ":"))
-        return normalized, _sha256(text)
-    return normalized, _sha256(canonical_json(["cellgraph-1", "definition", normalized, fields]))
+    analyzer = analysis.analyzers[cell.language]
+    grammar = analysis.vocabulary.grammar_for(analyzer)
+    body = grammar.strip_directives(cell.source, keys=directive_keys(analyzer))
+    normalized = analyzer.normalize(body)
+    # The same text in two languages is two programs.
+    text = canonical_json(["definition", PARTS_SCHEMA, cell.language, normalized, cell.key_fields])
+    return normalized, _sha256(text)
 
 
 # --- the execution key ------------------------------------------------------------
@@ -251,18 +255,15 @@ def shadowed_reads(analysis: Analysis, cell_id: str) -> set[str]:
 
 
 class _Assembly:
-    """Upstream components, by address, as Strata's ``_collect_input_hashes`` builds them."""
+    """Upstream components, by address."""
 
-    def __init__(self, legacy: bool):
-        self.legacy = legacy
+    def __init__(self) -> None:
         self.components: list[tuple[str, str]] = []
         self.unresolved: list[str] = []
 
     def component(self, ref: Any, by_content: bool, address: str) -> str | None:
-        """One output's component, or None when the legacy format skips it."""
+        """One output's component, or None when it cannot be read (then *address* is unresolved)."""
         if isinstance(ref, Unavailable) or ref is None:
-            if self.legacy:
-                return None
             self.unresolved.append(address)
             return None
         if isinstance(ref.identity, Run):
@@ -273,8 +274,7 @@ class _Assembly:
         if not by_content:
             return provenance
         if ref.content_digest is None:
-            if self.legacy:
-                return provenance
+            # A no-cache output is keyed by its bytes; its provenance says nothing of them.
             self.unresolved.append(address)
             return None
         return derive_subkey(provenance, f"content={ref.content_digest}")
@@ -292,7 +292,7 @@ def _upstream(
 ) -> _Assembly:
     graph = analysis.graph
     cell = analysis.cells[cell_id]
-    assembly = _Assembly(legacy=analysis.digest == "legacy-1")
+    assembly = _Assembly()
     upstream_ids = graph.cell_upstream.get(cell_id, [])
     if not upstream_ids:
         return assembly
@@ -331,7 +331,8 @@ def _upstream(
                     value = assembly.component(
                         instance_ref, by_content, f"output:{upstream_id}.{var}@{name}"
                     )
-                    parts.append(f"{name}={value}")
+                    if value is not None:
+                        parts.append(f"{name}={value}")
                 prefix = "variant" if read.scalar else "fanout"
                 assembly.add(
                     f"instances:{upstream_id}.{var}", f"{prefix}:{var}:{';'.join(sorted(parts))}"
@@ -411,7 +412,6 @@ def execution_key(
         if instance not in {name for name, _ in fanout.variants}:
             raise ValueError(f"cell {cell_id} has no instance {instance!r}")
 
-    legacy = analysis.digest == "legacy-1"
     if item is not None:
         assembly = _upstream(analysis, cell_id, None, published, without=source)
         assembly.add(f"each:{source}", f"each:{item.key}={item.digest}")
@@ -430,20 +430,17 @@ def execution_key(
         if isinstance(result, Unavailable):
             assembly.unresolved.append(address)
             continue
-        if legacy:
-            if result.legacy is None:
-                raise ValueError(
-                    f"the {spec.kind} resolver gave no legacy string for {spec.name!r}"
-                )
-            component = result.legacy
-        else:
-            component = canonical_json([spec.kind, spec.name, result.identity, result.fingerprint])
+        component = canonical_json([spec.kind, spec.name, result.identity, result.fingerprint])
         inputs.append((spec.kind, spec.name, component))
+
+    # A field the key cannot encode is missing from the definition key, so no key is sound.
+    for d in cell.diagnostics:
+        if d.annotation is not None and d.code == f"{d.annotation}_unencodable":
+            assembly.unresolved.append(f"field:{d.annotation}")
 
     assert cell.definition_key is not None
     parts: dict[str, Any] = {
         "parts_schema": PARTS_SCHEMA,
-        "digest": analysis.digest,
         "scope": "instance" if instance is not None else "cell",
         "instance": instance,
         "definition_key": cell.definition_key,
@@ -453,33 +450,11 @@ def execution_key(
         "inputs": sorted([kind, name, component] for kind, name, component in inputs),
     }
     if not owns_key:
-        return HostKeyed(parts=parts)
+        return HostKeyed(parts=parts, unresolved=tuple(assembly.unresolved))
     if assembly.unresolved:
         return Unavailable(
             reason="unresolved: " + ", ".join(assembly.unresolved),
             parts=parts,
             unresolved=tuple(assembly.unresolved),
         )
-
-    components = [value for _, value in assembly.components] + [c for _, _, c in inputs]
-    if legacy:
-        digest = compute_provenance_hash(components, cell.definition_key, env_hash)
-        if item is not None:
-            digest = derive_subkey(digest, f"each={item.key}")
-        elif instance is not None:
-            digest = derive_subkey(digest, f"variant={instance}")
-    else:
-        digest = _sha256(
-            canonical_json(
-                [
-                    "cellgraph-1",
-                    "execution",
-                    cell.definition_key,
-                    env_hash,
-                    sorted(components),
-                    parts["scope"],
-                    instance,
-                ]
-            )
-        )
-    return Keyed(digest=digest, parts=parts)
+    return Keyed(digest=parts_digest(parts), parts=parts)

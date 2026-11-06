@@ -8,10 +8,6 @@ asks before running one.
 """
 
 from cellgraph.analysis import (
-    DIGEST_CELLGRAPH_1,
-    DIGEST_LEGACY_1,
-    NORMALIZE_CELLGRAPH_1,
-    NORMALIZE_LEGACY_1,
     Analysis,
     Cell,
     CellAnalysis,
@@ -52,8 +48,8 @@ from cellgraph.keys import (
     Unavailable,
     VariantRead,
     canonical_json,
-    compute_provenance_hash,
     derive_subkey,
+    parts_digest,
 )
 from cellgraph.languages import (
     Analyzed,
@@ -83,11 +79,7 @@ from cellgraph.vocabulary import (
 register_language_analyzer("python", PythonAnalyzer())
 
 __all__ = [
-    "DIGEST_CELLGRAPH_1",
-    "DIGEST_LEGACY_1",
     "GRAMMAR",
-    "NORMALIZE_CELLGRAPH_1",
-    "NORMALIZE_LEGACY_1",
     "PARTS_SCHEMA",
     "After",
     "Analysis",
@@ -137,13 +129,13 @@ __all__ = [
     "analyze",
     "canonical_json",
     "comment_marker",
-    "compute_provenance_hash",
     "derive_subkey",
     "directive_keys",
     "flag",
     "get_language_analyzer",
     "is_stacked",
     "mark_stacked",
+    "parts_digest",
     "register_language_analyzer",
     "scalar",
     "stacked",

@@ -1,8 +1,6 @@
 """Keys against the formulas written out here, not against cellgraph's helpers."""
 
-import ast
 import hashlib
-import json
 from collections.abc import Mapping
 
 import pytest
@@ -12,30 +10,13 @@ from vestigo.provenance import derive_subkey as vestigo_subkey
 import cellgraph as cg
 
 ENV = "e" * 64
+PINNED_PYTHON = "5cf60a1a11e9631e44ecda5728cb6584bffa0d33a3a318d18b7c63a9b2f5d883"
+PINNED_WORDS = "ba1405d04d3e9d66b09f81db9ab7ac4226ff72a3dbdd54c0a1109a1bd16156a1"
+PINNED_EXECUTION = "959300097c327545a4fb36aacffcd5dc1d072a8912c19ca606d943c39c2d338c"
 
 
 def sha(text):
     return hashlib.sha256(text.encode()).hexdigest()
-
-
-def strata_source_hash(source, fields=None):
-    """Strata's compute_source_hash: the AST round trip, then the key fields."""
-    try:
-        text = ast.unparse(ast.parse(source))
-    except SyntaxError:
-        text = "\n".join(line.rstrip() for line in source.splitlines()).strip()
-    if fields:
-        text += "\0" + json.dumps(fields, sort_keys=True, separators=(",", ":"))
-    return sha(text)
-
-
-def strata_provenance(inputs, source_hash, env_hash):
-    hasher = hashlib.sha256()
-    for component in sorted(inputs):
-        hasher.update(component.encode() + b"\0")
-    hasher.update(source_hash.encode() + b"\0")
-    hasher.update(env_hash.encode())
-    return hasher.hexdigest()
 
 
 def published(**by_cell):
@@ -53,100 +34,112 @@ def out(**refs):
 # --- definition keys ----------------------------------------------------------
 
 
-def test_the_legacy_definition_key_is_strata_source_hash(run):
-    source = "# @mode fast\nx  =  1  # comment"
-    analysis = run(source)
-    assert analysis.cells["c0"].definition_key == strata_source_hash(
-        source, {"mode": {"m": "fast"}}
-    )
-    plain = run("y = 2")
-    assert plain.cells["c0"].definition_key == strata_source_hash("y = 2")
+def key_of(vocab, source, language="words"):
+    return cg.analyze(
+        [cg.Cell("a", source, language=language)],
+        vocab,
+        analyzers={"dashes": Dashes(), "words": Words(), "python": cg.PythonAnalyzer()},
+    ).cells["a"]
 
 
-def test_the_legacy_normalization_is_the_whole_source_in_any_language(vocab):
-    source = "# @name n\ny  x"
-    analysis = cg.analyze(
-        [cg.Cell("a", source, language="words")], vocab, analyzers={"words": Words()}
-    )
-    # ``y x`` does not parse, so the line strip keeps the directive in the text.
-    assert analysis.cells["a"].definition_key == strata_source_hash(source)
-
-
-def test_cellgraph_1_strips_directives_and_uses_the_language_normalizer(vocab):
-    def key(source):
-        return cg.analyze(
-            [cg.Cell("a", source, language="words")],
-            vocab,
-            analyzers={"words": Words()},
-            normalization=cg.NORMALIZE_CELLGRAPH_1,
-            digest=cg.DIGEST_CELLGRAPH_1,
-        ).cells["a"]
-
-    cell = key("# @name n\n# @mode fast\ny  x  ")
+def test_the_definition_key_is_the_language_the_body_and_the_fields(vocab):
+    cell = key_of(vocab, "# @name n\n# @mode fast\ny  x  ")
     assert cell.normalized == "y  x"
-    expected = ["cellgraph-1", "definition", "y  x", {"mode": {"m": "fast"}}]
+    expected = ["definition", cg.PARTS_SCHEMA, "words", "y  x", {"mode": {"m": "fast"}}]
     assert cell.definition_key == sha(cg.canonical_json(expected))
-    assert key("# @name other\n# @mode fast\ny  x").definition_key == cell.definition_key
+    # A directive that is not in the key changes nothing. Other comments are the body's,
+    # for its normalizer to judge.
+    assert key_of(vocab, "# @name other\n# @mode fast\ny  x").definition_key == (
+        cell.definition_key
+    )
+    assert key_of(vocab, "# note\n# @mode fast\ny  x").normalized == "# note\ny  x"
+    assert key_of(vocab, "# @mode slow\ny  x").definition_key != cell.definition_key
 
 
-def test_cellgraph_1_strips_a_dash_languages_directives(vocab):
-    def key(source, language="dashes"):
-        return cg.analyze(
-            [cg.Cell("a", source, language=language)],
-            vocab,
-            analyzers={"dashes": Dashes(), "words": Words()},
-            normalization=cg.NORMALIZE_CELLGRAPH_1,
-            digest=cg.DIGEST_CELLGRAPH_1,
-        ).cells["a"]
+def test_the_same_text_in_another_language_is_another_definition(vocab):
+    words = key_of(vocab, "x = 1", "words")
+    python = key_of(vocab, "x = 1", "python")
+    assert words.normalized == python.normalized == "x = 1"
+    assert words.definition_key != python.definition_key
 
-    cell = key("-- @name n\n-- @mode fast\ny  x  ")
+
+def test_a_python_definition_key_is_the_ast_round_trip_of_its_body(vocab):
+    cell = key_of(vocab, "# @mode fast\n# note\nx  =  1  # c\n", "python")
+    assert cell.normalized == "x = 1"
+    assert key_of(vocab, "x=1", "python").definition_key != cell.definition_key  # fields
+    assert key_of(vocab, "# @mode fast\nx=1", "python").definition_key == cell.definition_key
+
+
+def test_a_dash_languages_definition_key_strips_its_directives(vocab):
+    cell = key_of(vocab, "-- @name n\n-- @mode fast\ny  x  ", "dashes")
     assert cell.normalized == "y  x"
-    # The same key as the ``#`` spelling in a ``#`` language with the same normalizer.
-    assert cell.definition_key == key("# @name n\n# @mode fast\ny  x", "words").definition_key
-    assert key("-- @name other\n-- @mode fast\ny  x").definition_key == cell.definition_key
-    assert key("-- @name n\n-- @mode fast\ny  z").definition_key != cell.definition_key
+    assert key_of(vocab, "-- @name other\n-- @mode fast\ny  x", "dashes").definition_key == (
+        cell.definition_key
+    )
+    assert key_of(vocab, "-- @name n\n-- @mode fast\ny  z", "dashes").definition_key != (
+        cell.definition_key
+    )
     # Under ``--`` a ``#`` line is body, so it stays in the normalized text.
-    assert key("# @mode fast\ny  x").normalized == "# @mode fast\ny  x"
+    assert key_of(vocab, "# @mode fast\ny  x", "dashes").normalized == "# @mode fast\ny  x"
 
 
-def test_a_hash_languages_cellgraph_1_definition_key_is_pinned(vocab):
-    def key(language, analyzer):
-        source = "# @name n\n# @mode fast\n# note\nx  =  1  # c\n"
-        return (
-            cg.analyze(
-                [cg.Cell("a", source, language=language)],
-                vocab,
-                analyzers={language: analyzer},
-                normalization=cg.NORMALIZE_CELLGRAPH_1,
-                digest=cg.DIGEST_CELLGRAPH_1,
-            )
-            .cells["a"]
-            .definition_key
-        )
-
-    assert key("python", cg.PythonAnalyzer()) == (
-        "8d63e86ec7024093a0cda8fa649016fe8c6ec311043ec004c8976db7679a8131"
-    )
-    assert key("words", Words()) == (
-        "c5eb8a85df924a5b93bcf0782a924d8df752ed9267cdca6c9a49fbee223395e7"
-    )
+def test_a_definition_key_is_pinned(vocab):
+    source = "# @name n\n# @mode fast\n# note\nx  =  1  # c\n"
+    assert key_of(vocab, source, "python").definition_key == PINNED_PYTHON
+    assert key_of(vocab, source, "words").definition_key == PINNED_WORDS
 
 
 def test_canonical_json_is_sorted_and_compact():
     assert cg.canonical_json({"b": [1, "é"], "a": None}) == '{"a":null,"b":[1,"é"]}'
 
 
+@pytest.mark.parametrize("value", [{1: "a"}, {True: 1}, {None: 1}, [{"ok": {2: 0}}]])
+def test_canonical_json_refuses_a_key_that_is_not_a_str(value):
+    # ``json`` would write ``{1: "a"}`` as ``{"1": "a"}``, and the two would share a key.
+    with pytest.raises(TypeError, match="must be a str"):
+        cg.canonical_json(value)
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), [-float("inf")]])
+def test_canonical_json_refuses_nan_and_infinity(value):
+    with pytest.raises(ValueError):
+        cg.canonical_json(value)
+
+
 # --- execution keys -----------------------------------------------------------
 
 
-def test_a_legacy_execution_key_is_strata_provenance_hash(run):
+def test_an_execution_key_is_the_digest_of_its_parts(run):
     analysis = run("x = 1", "y = x")
     key = analysis.execution_key("c1", published=published(c0=out(x="h0")), env_hash=ENV)
-    defn = analysis.cells["c1"].definition_key
-    assert key.digest == strata_provenance(["h0"], defn, ENV)
-    assert key.parts["parts_schema"] == cg.PARTS_SCHEMA == 1
-    assert key.parts["upstream"] == [["output:c0.x", "h0"]]
-    assert key.parts["scope"] == "cell" and key.parts["instance"] is None
+    assert key.digest == cg.parts_digest(key.parts) == sha(cg.canonical_json(key.parts))
+    assert key.parts == {
+        "parts_schema": cg.PARTS_SCHEMA,
+        "scope": "cell",
+        "instance": None,
+        "definition_key": analysis.cells["c1"].definition_key,
+        "fields": {},
+        "env_hash": ENV,
+        "upstream": [["output:c0.x", "h0"]],
+        "inputs": [],
+    }
+    assert cg.PARTS_SCHEMA == 2
+    assert key.digest == PINNED_EXECUTION
+
+
+def test_which_variable_a_component_is_counts(run):
+    # Swapping two outputs' contents is a different input, so a different key.
+    analysis = run("# @nocache\nx, y = 1, 2", "z = x - y")
+
+    def key(dx, dy):
+        refs = {
+            "x": cg.OutputRef(cg.Provenance("P"), dx),
+            "y": cg.OutputRef(cg.Provenance("P"), dy),
+        }
+        snapshot = cg.Published(outputs=refs)
+        return analysis.execution_key("c1", published=published(c0=snapshot), env_hash=ENV)
+
+    assert key("d1", "d2").digest != key("d2", "d1").digest
 
 
 def test_run_identity_is_tagged_content_or_run(run):
@@ -169,23 +162,18 @@ def test_a_nocache_upstream_is_keyed_by_its_bytes(run):
     assert key.parts["upstream"] == [["output:c0.x", vestigo_subkey("h0", "content=d0")]]
 
 
-def test_a_nocache_upstream_without_a_digest(run, vocab):
+def test_a_nocache_upstream_without_a_digest_is_unavailable(run):
+    # Its key follows its bytes, which its provenance does not name.
     snapshot = out(x=cg.OutputRef(cg.Provenance("h0")))
-    legacy = run("# @nocache\nx = 1", "y = x")
-    key = legacy.execution_key("c1", published=published(c0=snapshot), env_hash=ENV)
-    assert key.parts["upstream"] == [["output:c0.x", "h0"]]
-    cg1 = run("# @nocache\nx = 1", "y = x", digest=cg.DIGEST_CELLGRAPH_1)
-    key = cg1.execution_key("c1", published=published(c0=snapshot), env_hash=ENV)
+    analysis = run("# @nocache\nx = 1", "y = x")
+    key = analysis.execution_key("c1", published=published(c0=snapshot), env_hash=ENV)
     assert isinstance(key, cg.Unavailable) and key.unresolved == ("output:c0.x",)
 
 
-def test_an_unreadable_output_is_skipped_by_legacy_and_unresolved_by_cellgraph_1(run):
+def test_an_unreadable_output_is_unavailable(run):
     snapshot = out(x=cg.Unavailable("gone"), z="hz")
-    legacy = run("x = 1\nz = 1", "y = x + z")
-    key = legacy.execution_key("c1", published=published(c0=snapshot), env_hash=ENV)
-    assert key.digest == strata_provenance(["hz"], legacy.cells["c1"].definition_key, ENV)
-    cg1 = run("x = 1\nz = 1", "y = x + z", digest=cg.DIGEST_CELLGRAPH_1)
-    key = cg1.execution_key("c1", published=published(c0=snapshot), env_hash=ENV)
+    analysis = run("x = 1\nz = 1", "y = x + z")
+    key = analysis.execution_key("c1", published=published(c0=snapshot), env_hash=ENV)
     assert isinstance(key, cg.Unavailable)
     assert key.unresolved == ("output:c0.x",)
     assert key.parts["upstream"] == [["output:c0.z", "hz"]]
@@ -207,26 +195,25 @@ def test_a_shadowed_name_adds_its_wired_producer(run):
     assert not any(address.startswith("wired:c0") for address, _ in key.parts["upstream"])
 
 
-def test_inputs_need_a_resolver_and_a_legacy_string(run):
+def test_an_input_is_its_kind_name_identity_and_fingerprint(run):
     analysis = run("# @source data\ny = data")
     with pytest.raises(ValueError, match="no resolver"):
         analysis.execution_key("c0", published=published(), env_hash=ENV)
-    with pytest.raises(ValueError, match="legacy"):
-        analysis.execution_key(
+
+    def key(fingerprint):
+        return analysis.execution_key(
             "c0",
             published=published(),
             env_hash=ENV,
-            resolve={"file": lambda spec: cg.Resolved("data", "fp")},
+            resolve={"file": lambda spec: cg.Resolved({"uri": "u"}, fingerprint)},
         )
-    key = analysis.execution_key(
-        "c0",
-        published=published(),
-        env_hash=ENV,
-        resolve={
-            "file": lambda spec: cg.Resolved("data", "fp", legacy=f"file:{spec.spec['path']}")
-        },
-    )
-    assert key.digest == strata_provenance(["file:data"], analysis.cells["c0"].definition_key, ENV)
+
+    component = cg.canonical_json(["file", "data", {"uri": "u"}, "fp"])
+    assert key("fp").parts["inputs"] == [["file", "data", component]]
+    assert key("fp").digest == cg.parts_digest(key("fp").parts)
+    assert key("other").digest != key("fp").digest
+    with pytest.raises(TypeError, match="must be a str"):
+        key({1: "a"})
 
 
 def test_an_unresolved_input_keeps_the_parts_it_built(run):
@@ -242,22 +229,6 @@ def test_an_unresolved_input_keeps_the_parts_it_built(run):
     assert key.parts["upstream"] == [["output:c0.x", "h0"]]
 
 
-def test_the_cellgraph_1_execution_digest(run):
-    analysis = run("# @source data\ny = data", digest=cg.DIGEST_CELLGRAPH_1)
-    key = analysis.execution_key(
-        "c0",
-        published=published(),
-        env_hash=ENV,
-        resolve={"file": lambda spec: cg.Resolved({"uri": "u"}, "fp")},
-    )
-    component = cg.canonical_json(["file", "data", {"uri": "u"}, "fp"])
-    defn = analysis.cells["c0"].definition_key
-    assert key.digest == sha(
-        cg.canonical_json(["cellgraph-1", "execution", defn, ENV, [component], "cell", None])
-    )
-    assert key.parts["digest"] == "cellgraph-1"
-
-
 def test_a_host_keyed_language_gets_no_digest(vocab):
     class HostOwned(Words):
         owns_key = False
@@ -271,7 +242,11 @@ def test_a_host_keyed_language_gets_no_digest(vocab):
     assert isinstance(key, cg.HostKeyed)
     # What it reads upstream, for the host's own key.
     assert key.parts["upstream"] == [["output:p.y", "hp"]]
-    assert key.parts["inputs"] == []
+    assert key.parts["inputs"] == [] and key.unresolved == ()
+    # An upstream it cannot read is named, so the host does not key on what is there.
+    snapshot = out(y=cg.Unavailable("gone"))
+    missing = analysis.execution_key("a", published=published(p=snapshot), env_hash=ENV)
+    assert isinstance(missing, cg.HostKeyed) and missing.unresolved == ("output:p.y",)
 
 
 def test_a_blocked_cell_and_its_dependents_are_keyed(run):
@@ -279,9 +254,17 @@ def test_a_blocked_cell_and_its_dependents_are_keyed(run):
     analysis = run("# @nocache maybe\nx = 1", "y = x")
     assert not analysis.cells["c0"].plannable and not analysis.cells["c1"].plannable
     blocked = analysis.execution_key("c0", published=published(), env_hash=ENV)
-    assert blocked.digest == strata_provenance([], analysis.cells["c0"].definition_key, ENV)
+    assert blocked.digest == cg.parts_digest(blocked.parts)
     below = analysis.execution_key("c1", published=published(c0=out(x="h0")), env_hash=ENV)
-    assert below.digest == strata_provenance(["h0"], analysis.cells["c1"].definition_key, ENV)
+    assert below.parts["upstream"] == [["output:c0.x", "h0"]]
+
+
+def test_a_field_the_key_cannot_encode_leaves_no_key(vocab):
+    # Its value is missing from the definition key, so cells that differ in it would share one.
+    odd = cg.Vocabulary([cg.Annotation("m", parse=cg.scalar(lambda s: {1: s}))])
+    analysis = cg.analyze([cg.Cell("c0", "# @m fast\nx = 1")], cg.Vocabulary.core() | odd)
+    key = analysis.execution_key("c0", published=published(), env_hash=ENV)
+    assert isinstance(key, cg.Unavailable) and key.unresolved == ("field:m",)
 
 
 def test_the_shadowed_reads(run):

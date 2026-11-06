@@ -2,8 +2,7 @@
 
 import pytest
 from conftest import codes, edges
-from test_keys import ENV, out, published, strata_provenance
-from vestigo.provenance import derive_subkey as vestigo_subkey
+from test_keys import ENV, out, published
 
 import cellgraph as cg
 
@@ -34,9 +33,7 @@ def test_a_sweep_reader_reads_every_member(run):
         "c2", published=published(c0=out(m="h0"), c1=out(m="h1")), env_hash=ENV
     )
     assert key.parts["upstream"] == [["sweep:m", "sweep:m:big=h1;small=h0"]]
-    assert key.digest == strata_provenance(
-        ["sweep:m:big=h1;small=h0"], analysis.cells["c2"].definition_key, ENV
-    )
+    assert key.digest == cg.parts_digest(key.parts)
 
 
 def test_a_variant_collision_is_structural_on_both_cells(run):
@@ -80,8 +77,9 @@ def test_instance_keys_read_their_own_variant(run):
     upstream = published(c0=out(m="h0"), c1=out(m="h1"))
     small = analysis.execution_key("c2", instance="small", published=upstream, env_hash=ENV)
     assert small.parts["upstream"] == [["variant:c0.m@small", "variant:m:small=h0"]]
-    base = strata_provenance(["variant:m:small=h0"], analysis.cells["c2"].definition_key, ENV)
-    assert small.digest == vestigo_subkey(base, "variant=small")
+    assert (small.parts["scope"], small.parts["instance"]) == ("instance", "small")
+    cell = analysis.execution_key("c2", published=upstream, env_hash=ENV)
+    assert cell.digest != small.digest
     # The big member's bytes do not reach the small instance.
     moved = published(c0=out(m="h0"), c1=out(m="other"))
     again = analysis.execution_key("c2", instance="small", published=moved, env_hash=ENV)
@@ -249,11 +247,31 @@ def test_an_item_key_leaves_its_source_out(run):
     assert each_key(analysis, item, other="moved").digest != key.digest
 
 
-def test_the_legacy_item_key_is_a_subkey_of_its_base(run):
+def test_an_item_key_may_name_a_path_or_a_uri(run):
     analysis = run(*EACH)
-    key = each_key(analysis, cg.Item("a", "d1"))
-    base = strata_provenance(["each:a=d1", "ho"], analysis.cells["c2"].definition_key, ENV)
-    assert key.digest == vestigo_subkey(base, "each=a")
+    key = each_key(analysis, cg.Item("s3://bucket/a.csv", "d1"))
+    assert key.parts["instance"] == "s3://bucket/a.csv"
+    assert key.digest == cg.parts_digest(key.parts)
+
+
+def test_reading_the_source_through_an_effect_is_each_reads_source():
+    # The item key leaves the source out, so a declared read of it is refused too.
+    host = cg.Vocabulary.core() | cg.Vocabulary(
+        [cg.Annotation("ext", effects=lambda v: [cg.Reads(v.split())], in_key=False)]
+    )
+    analysis = cg.analyze(
+        [
+            cg.Cell("c0", "items = [1]"),
+            cg.Cell("c1", "# @ext items\n# @each item in items\nr = item"),
+        ],
+        host,
+    )
+    assert codes(analysis, "c1") == ["each_reads_source"]
+
+
+def test_reading_a_source_named_like_a_builtin_is_each_reads_source(run):
+    analysis = run("input = [1, 2]", "# @each item in input\nprint(item, len(input))")
+    assert codes(analysis, "c1") == ["each_reads_source"]
 
 
 def test_the_cell_key_covers_the_whole_source(run):
@@ -279,12 +297,14 @@ def test_a_bound_source_is_left_out_of_an_item_key_too():
     analysis = cg.analyze([cg.Cell("c0", "# @each path in raw\nr = str(path)")], host)
     assert analysis.cells["c0"].references == []
     assert codes(analysis) == []
-    resolve = {"mount": lambda spec: cg.Resolved(spec.name, "fp", legacy="fp")}
+    resolve = {"mount": lambda spec: cg.Resolved(spec.name, "fp")}
 
     whole = analysis.execution_key("c0", published=published(), resolve=resolve, env_hash=ENV)
-    assert whole.parts["inputs"] == [["mount", "raw", "fp"]]
+    assert whole.parts["inputs"] == [
+        ["mount", "raw", cg.canonical_json(["mount", "raw", "raw", "fp"])]
+    ]
 
-    moved = {"mount": lambda spec: cg.Resolved(spec.name, "moved", legacy="moved")}
+    moved = {"mount": lambda spec: cg.Resolved(spec.name, "moved")}
     item = cg.Item("a.csv", "d1")
     key = analysis.execution_key(
         "c0", instance=item, published=published(), resolve=resolve, env_hash=ENV
