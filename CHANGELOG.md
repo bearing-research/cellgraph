@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- docs/api.md says what the pre-release audit found missing or wrong (#23):
+  - Under `from __future__ import annotations` an annotation reads nothing, and a
+    binding under `if`, `try` or a loop counts as made.
+  - Every `upstream` and `unresolved` address in full, and what `execution_key`
+    raises: a `ValueError` for a call it cannot answer, a `TypeError` for a value
+    that is not canonical JSON.
+  - The `Dag` methods `wired_variables`, `read_producer`, `sweep_groups_read` and
+    `upstream_reachable`; the `Effect` union, and that a hook returning anything
+    else is a `TypeError`; what `analyze` and `normalize` each get.
+  - `Vocabulary.replace` raises `KeyError` for a key the vocabulary does not have,
+    as `without` does, where a misspelt key changed nothing.
+
 - `analyze` stays up on odd text, and keys it apart (#22):
   - Lines break only at `\n`, `\r\n` and `\r`, as in Python. A form feed,
     `\u2028` and the others `str.splitlines` also breaks at stay inside the line,

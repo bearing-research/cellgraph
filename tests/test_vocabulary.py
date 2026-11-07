@@ -63,6 +63,11 @@ def test_replace_and_without():
     core = cg.Vocabulary.core()
     assert "name" not in core.without("name")
     assert core.replace("name", in_key=True)["name"].in_key
+    # A misspelt key is refused by both, not left as is.
+    with pytest.raises(KeyError):
+        core.replace("nmae", in_key=True)
+    with pytest.raises(KeyError):
+        core.without("nmae")
 
 
 def test_set_and_remove_write_the_languages_marker():

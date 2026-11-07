@@ -44,7 +44,7 @@ There a `#` line is body: it ends the block, and `# @key` is not a directive.
 | `parse_directive(line)` | `(key, value)` or None |
 | `strip(source)` | the source without its leading block |
 | `strip_directives(source, keys=None)` | the source without its directive lines (only `keys`' when given); other comments stay |
-| `set_directive(source, key, value)` | replace the first `# @key`, drop repeats, or insert one after the last directive; line endings are kept |
+| `set_directive(source, key, value)` | replace the first `# @key`, drop repeats, or insert one after the last directive (at the top when there is none); line endings are kept |
 | `remove_directive(source, key)` | every `# @key` in the block removed |
 
 A vocabulary edits a cell through the grammar of its language:
@@ -77,6 +77,9 @@ as a string or an iterable.
 | `Input(kind, name, spec=None)` | an external input; one per `(kind, name)` in a cell; `spec` is the resolver's and does not affect equality |
 | `NoCache()` | never served from cache; a downstream key follows this cell's bytes |
 
+`Effect` is the union of the ten. Anything else an annotation's `effects` or a
+vocabulary's `cell_effects` returns is a `TypeError`.
+
 ## Annotations and vocabularies
 
 ```python
@@ -86,9 +89,9 @@ Annotation(
 ```
 
 - `parse(directives)` gets every directive of `key` and of `also_reads`, in source
-  order. It raises `AnnotationError(message, code=None, line=None)` for a value it
-  cannot read; the code defaults to `<key>_unreadable` and the line to the
-  annotation's first. To report several problems, it raises an `ExceptionGroup` of
+  order. It raises `AnnotationError(message, *, code=None, line=None)` for a
+  value it cannot read; the code defaults to `<key>_unreadable` and the line to
+  the annotation's first. To report several problems, it raises an `ExceptionGroup` of
   `AnnotationError`s, and each becomes a diagnostic; any other exception in the
   group propagates. A parser that can read some lines and not others returns
   `Partial(value, errors)`: the annotation is present with `value`, and each error
@@ -120,16 +123,20 @@ Vocabulary(annotations, cell_effects=None, grammar=GRAMMAR)
 - A directive key claimed twice is refused, and so is a key in both sides of
   `a | b`, so composition order never decides a result. `|` chains the two
   `cell_effects` hooks, and keeps a custom `grammar` from either side; two that
-  differ are refused. Grammars are equal when they have the same class, marker and
+  differ are refused with a `ValueError`, so `Grammar("--")` and `Grammar("//")`
+  do not compose. Grammars are equal when they have the same class, marker and
   directive pattern, so two packages' `Grammar("--")` compose.
 - `cell_effects(meta, parsed)` is called for every cell with the host's `meta` and
   the parsed value of each present annotation. It is for effects that come from
   host configuration, such as mounts declared outside the source.
 - `Vocabulary.core()` holds `name` (metadata), `after`, `nocache`,
   `variant <group> <name>`, `per_variant [group]` and
-  `each <name> in <source> [key=<column>] [glob=<pattern>]` (in the key).
+  `each <name> in <source> [key=<column>] [glob=<pattern>]`. Of these,
+  `per_variant` and `each` are in the key.
 - `vocab[key]`, `key in vocab`, `vocab.keys` (also-read keys included),
-  `vocab.owner(directive_key)`, `vocab.without(*keys)`, `vocab.replace(key, **changes)`.
+  `vocab.owner(directive_key)`, `vocab.without(*keys)` and
+  `vocab.replace(key, **changes)`. `without` and `replace` raise `KeyError` for a
+  key the vocabulary does not have.
 - `vocab.set_directive(source, key, value, *, language="python")` refuses a
   stacked annotation's key, which a single-line edit would truncate. `language`
   picks the comment marker (see Cells and the grammar).
@@ -143,6 +150,9 @@ class LanguageAnalyzer(Protocol):
     def analyze(self, cell) -> Analyzed: ...
     def normalize(self, body: str) -> str: ...
 ```
+
+`analyze` gets the cell, its whole source with the directive block; `normalize`
+gets the body without the directive lines it reads, for the definition key.
 
 An analyzer may also set `directives`:
 
@@ -177,7 +187,8 @@ diagnostics)`.
 still gets names, edges, plannability and plan steps, and `execution_key` returns
 `HostKeyed`.
 
-- `register_language_analyzer(language, analyzer)` and `get_language_analyzer(language)`.
+- `register_language_analyzer(language, analyzer)` and
+  `get_language_analyzer(language)`.
 - `"python"` is registered on import as `PythonAnalyzer`. Module-level code runs in
   order, so a name read before the cell binds it is a reference, and so are the
   globals that function and class bodies read. A lambda or a generator is read
@@ -185,14 +196,17 @@ still gets names, edges, plannability and plan steps, and `execution_key` return
   the cell binds after it is the cell's own. Names starting with `_` are the
   cell's own and never cross cells, a star import binds nothing, `x: int` alone
   binds nothing, `except E as e` leaves `e` unbound (to a lambda or def in the
-  handler too), and a top-level `del x` unbinds `x`, as Python does. Annotations
-  count as reads, whatever Python cellgraph runs on, since the kernel's may
-  evaluate them. A cell nested deeper than the analyzer can walk is the error
-  `python_too_deep`. How deep that is depends on the Python: its parser recurses in
-  C, and before 3.14 Windows stops at about 3000 levels where Linux and macOS go
-  past 8000, so a long `a + a + ...` can be an error on one and not the other. One whose symbol table Python refuses (a module-level
-  `nonlocal`) is the warning `python_bodies_unread`, since what its function
-  bodies read is unknown.
+  handler too), and a top-level `del x` unbinds `x`, as Python does. A binding
+  under `if`, `try` or a loop counts as made, since which branch runs is not
+  known: `if c: x = 1` defines `x`. Annotations count as reads, whatever Python
+  cellgraph runs on, since the kernel's may evaluate them; under
+  `from __future__ import annotations` they are strings, and read nothing.
+- A cell nested deeper than the analyzer can walk is the error `python_too_deep`.
+  How deep that is depends on the Python: its parser recurses in C, and before
+  3.14 Windows stops at about 3000 levels where Linux and macOS go past 8000, so a
+  long `a + a + ...` can be an error on one and not the other. One whose symbol
+  table Python refuses (a module-level `nonlocal`) is the warning
+  `python_bodies_unread`, since what its function bodies read is unknown.
 - `registered_analyzers()` is a copy of the registry.
 - `strip_lines` is a ready-made normalizer: trailing whitespace and outer blank
   lines dropped.
@@ -290,7 +304,14 @@ it, so check `dag.inactive_cells` first.
   `topological_order` (Kahn);
 - `consumed_variables`, `variable_producer`, `read_producers`, `wired_inputs`,
   `variant_groups`, `inactive_cells`, `fanout_cells`, `each_cells`,
-  `shadow_warnings`.
+  `shadow_warnings`. An inactive cell keeps an empty entry in `cell_upstream` and
+  `cell_downstream`.
+- `wired_variables(consumer, producer)`: the variables `consumer` reads from
+  `producer`. `read_producer(consumer, var)`: what `consumer` reads `var` from, a
+  cell id or a `SweepProducer`, or None for a name it does not read.
+  `sweep_groups_read(consumer)`: the groups whose sweep (or a fan-out over it) it
+  reads. `upstream_reachable(start)`: the cells upstream of `start`, itself
+  included.
 - `variant_groups` is a list of `VariantGroupResolution(group, active_name,
   active_cell_id, members, mode)`, with `members` the `(cell_id, name)` pairs in
   source order, inactive ones included.
@@ -329,7 +350,8 @@ analysis.execution_key(cell_id, *, instance=None, published, resolve=None, env_h
     `Unavailable` when it is published but unreadable.
   - A fan-out cell lists each variable in `outputs` and each `(variable, variant)`
     in `instances`.
-  - `cell_ref` is the older single cell-level output. An instance leaves out
+  - `cell_ref` is the older single cell-level output, used only when `outputs` is
+    empty. An instance leaves out
     another variant's, unless it reads from that cell or orders after it
     (`@seed`, `@after`).
 - `identity` is `Provenance(hash)` for an output filed under a reusable key, or
@@ -350,11 +372,11 @@ analysis.execution_key(cell_id, *, instance=None, published, resolve=None, env_h
   `Resolver` is that callable's type. Both values must be canonical JSON, and the
   component is `canonical_json([kind, name, identity, fingerprint])`, which
   `input_component(kind, name, resolved)` builds.
-- `instance` is an `Item(key, digest)` on an `@each` cell: the key is built with this
-  item in place of its source, under `each:<source>` in `upstream`, so changing one
-  item leaves the others' keys alone. Which items there are, and what a digest covers,
-  are the host's. `instance=None` is the cell-level key, over the whole source; a cell
-  reading the output sees one ordinary output.
+- `instance` is an `Item(key, digest)` on an `@each` cell: the key is built with
+  this item in place of its source, under `each:<source>` in `upstream`, so
+  changing one item leaves the others' keys alone. Which items there are, and what
+  a digest covers, are the host's. `instance=None` is the cell-level key, over the
+  whole source; a cell reading the output sees one ordinary output.
 - `instance` names one variant of a fan-out cell. It reads its own group's
   variable as a scalar of that variant. Either kind of instance is `scope` and
   `instance` in `parts`, so it is in the key.
@@ -363,8 +385,11 @@ Results:
 
 - `Keyed(digest, parts)`.
 - `Unavailable(reason, parts, unresolved)`: an unreadable output, a no-cache
-  `Provenance` output without a content digest (its key follows its bytes), an unresolved
-  input, or an in-key annotation missing from the fields (`field:<key>`).
+  `Provenance` output without a content digest (its key follows its bytes), an
+  unresolved input, or an in-key annotation missing from the fields.
+  `unresolved` holds their addresses: `output:<cell>.<var>`,
+  `output:<cell>.<var>@<variant>` for one instance, `cell:<cell>`,
+  `input:<kind>:<name>` and `field:<key>`.
 - `HostKeyed(parts, unresolved)`: for a language with `owns_key=False`. `parts`
   holds the upstream components it reads and no inputs; the host adds its own and
   keys them with `parts_digest`, building each with `input_component`.
@@ -377,6 +402,13 @@ cycle or variant collision reaches (on it or upstream) raises
 `NotPlannableError(cell_id, diagnostics)` with those structural diagnostics, and
 an inactive variant `InactiveVariantError(cell_id)`.
 
+A call the analysis cannot answer is a `ValueError`: an input kind with no entry in
+`resolve`, or an `instance` the cell does not have (a variant name on a cell that
+does not fan out, an `Item` on one that is not `@each`, or an `Item` on a cell
+without items). A value that is not canonical JSON (`env_hash`, a hash, digest or
+id in `published`, a resolver's `identity` or `fingerprint`, an `Item`'s key or
+digest) is a `TypeError` from `canonical_json`.
+
 `outputs` is read lazily: a variable's ref is looked up only when the key counts
 it, so a host can pass a mapping that reads its store on demand.
 
@@ -384,13 +416,15 @@ it, so a host can pass a mapping that reads its store on demand.
 
 - `scope` (`cell` or `instance`), `instance`, `definition_key`, `fields`,
   `env_hash`;
-- `upstream`: `[address, component]` pairs, with addresses `output:`, `cell:`,
-  `wired:`, `variant:`, `sweep:`, `instances:` and `each:`. An `output:` or
+- `upstream`: `[address, component]` pairs, with addresses
+  `output:<cell>.<var>`, `cell:<cell>`, `wired:<cell>.<var>`,
+  `variant:<cell>.<var>@<name>`, `sweep:<group>.<var>`, `instances:<cell>.<var>`
+  and `each:<source>`. An `output:` or
   `cell:` component is the output's own, as above; the others are canonical JSON
   lists that begin with their kind and nest that list:
   `["wired", var, component]`,
   `["variant", var, name, component]`,
-  `["sweep", group, var, [[name, component], ...]]` under `sweep:<group>.<var>`,
+  `["sweep", group, var, [[name, component], ...]]`,
   `["variant" or "fanout", var, [[name, component], ...]]` under `instances:`, and
   `["each", key, digest]`. A fan-out cell's output with no instances (one it
   publishes once) is an `output:`;
@@ -411,8 +445,9 @@ JavaScript's `JSON.stringify` does. It takes only what `is_canonical` accepts
 (None, bool, an int of at most 640 digits, finite float, str, and lists and
 str-keyed dicts of these), which is also the rule for a key field: `json` would
 turn `{1: "a"}` into `{"1": "a"}` and a tuple into a list, so two values would
-share a key. Anything else is a `TypeError`. Fan-out and sweep components are JSON lists of
-`[name, component]` pairs, so no host string can forge another instance.
+share a key. Anything else is a `TypeError`. Fan-out and sweep components are
+JSON lists of `[name, component]` pairs, so no host string can forge another
+instance.
 
 ## Planning
 
