@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 - 2026-11-06
 
 - docs/api.md says what the pre-release audit found missing or wrong (#23):
   - Under `from __future__ import annotations` an annotation reads nothing, and a
