@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from cellgraph.diagnostics import Diagnostic, Severity
-from cellgraph.languages import Analyzed
+from cellgraph.languages import Analyzed, strip_lines
 
 if TYPE_CHECKING:
     from cellgraph.analysis import Cell
@@ -722,7 +722,7 @@ def _symbol_tables(source: str, tree: ast.Module) -> list[symtable.SymbolTable] 
     try:
         text = _deeply(rewritten) if _needs_rewrite(tree) else source
         return [symtable.symtable(text, "<cell>", "exec")]
-    except (SyntaxError, RecursionError, ValueError, MemoryError):
+    except UNPARSEABLE:
         return None
 
 
@@ -860,6 +860,10 @@ def _global_augmented(tree: ast.Module) -> set[str]:
     return found
 
 
+# What parsing raises for text Python cannot read: bad syntax, a lone surrogate (a
+# ValueError), or nesting past the parser.
+UNPARSEABLE = (SyntaxError, ValueError, RecursionError, MemoryError)
+
 _BUILTIN_NAMES = frozenset(dir(builtins)) | {"__name__", "__file__", "__doc__", "__package__"}
 
 
@@ -872,6 +876,9 @@ def analyze_cell(source: str) -> CellNames:
         tree = ast.parse(source)
     except SyntaxError as e:
         return CellNames(defines=[], references=[], error=f"Syntax error: {e.msg}")
+    except ValueError:
+        # A lone surrogate, as a truncated emoji in a notebook file leaves.
+        return CellNames(defines=[], references=[], error="Syntax error: not UTF-8 text")
     except (RecursionError, MemoryError):
         return CellNames(too_deep=True)
 
@@ -957,9 +964,8 @@ def normalize(source: str) -> str:
 def _normalized(source: str) -> str:
     try:
         return _deeply(lambda: ast.unparse(ast.parse(source)))
-    except (SyntaxError, RecursionError, ValueError, MemoryError):
-        lines = [line.rstrip() for line in source.splitlines()]
-        return "\n".join(lines).strip()
+    except UNPARSEABLE:
+        return strip_lines(source)
 
 
 class PythonAnalyzer:

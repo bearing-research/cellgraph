@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -62,11 +63,20 @@ def is_canonical(value: Any) -> bool:
     return False
 
 
+# Only inside a JSON string: json writes nothing else that is not ASCII.
+_SURROGATE = re.compile("[\ud800-\udfff]")
+
+
 def canonical_json(value: Any) -> str:
-    """Sorted keys, no whitespace, UTF-8 as is; a value ``is_canonical`` refuses is a TypeError."""
+    """Sorted keys, no whitespace, UTF-8 as is; a value ``is_canonical`` refuses is a TypeError.
+
+    A lone surrogate (a truncated emoji) is escaped, ``\\udXXX``, as JavaScript's
+    ``JSON.stringify`` writes it, so the text is valid UTF-8.
+    """
     if not is_canonical(value):
         raise TypeError(f"not a canonical JSON value: {value!r}")
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    text = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return _SURROGATE.sub(lambda m: f"\\u{ord(m.group()):04x}", text)
 
 
 def parts_digest(parts: Mapping[str, Any]) -> str:

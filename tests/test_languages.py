@@ -25,7 +25,8 @@ class Dashes(Words):
 
 
 def test_strip_lines():
-    assert cg.strip_lines("\n  a  \n\tb \n\n") == "a\n\tb"
+    # Outer blank lines go; every line keeps its indentation, the first one too.
+    assert cg.strip_lines("\n  a  \n\tb \n\n") == "  a\n\tb"
 
 
 def test_a_registered_analyzer_is_used_by_language():

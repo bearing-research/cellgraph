@@ -2,7 +2,7 @@ import re
 
 import pytest
 
-from cellgraph.grammar import GRAMMAR, Directive, Grammar
+from cellgraph.grammar import GRAMMAR, Directive, Grammar, source_lines
 
 
 def test_the_block_ends_at_the_first_body_line():
@@ -148,3 +148,31 @@ def test_a_subclass_regex_and_init_work_as_before():
 
     assert OwnInit().directives("# @name x\ny = 1") == [Directive("name", "x", 1)]
     assert OwnInit().with_marker("--").directives("-- @a 1") == [Directive("a", "1", 1)]
+
+
+def test_a_line_breaks_only_where_python_breaks_it():
+    assert source_lines("a\r\nb\rc\nd\n") == ["a", "b", "c", "d"]
+    assert source_lines("a\x0cb\u2028c") == ["a\x0cb\u2028c"]
+    assert source_lines("") == []
+
+
+@pytest.mark.parametrize("brk", ["\x0b", "\x0c", "\x1c", "\x85", "\u2028", "\u2029"])
+def test_a_block_line_holding_another_break_is_body(brk):
+    # Python reads one comment; JavaScript breaks at \u2028, and reads code after it.
+    source = f"# @a 1{brk}x = 1\ny = 2"
+    assert GRAMMAR.directives(source) == []
+    assert GRAMMAR.strip_directives(source) == source
+    assert GRAMMAR.strip(source) == source
+    # As blank space around a line, it is not inside it.
+    assert GRAMMAR.directives(f"{brk}\n# @a 1{brk}\nx = 1") == [Directive("a", "1", 2)]
+
+
+def test_a_splice_keeps_a_lone_cr():
+    assert GRAMMAR.set_directive("# @a 1\rx = 1\r", "b", "2") == "# @a 1\r# @b 2\rx = 1\r"
+    assert GRAMMAR.remove_directive("# @a 1\rx = 1\r", "a") == "x = 1\r"
+
+
+def test_a_splice_leaves_a_line_holding_another_break_whole():
+    source = "# @a 1\x0cx = 1\n"
+    assert GRAMMAR.set_directive(source, "a", "2") == "# @a 2\n# @a 1\x0cx = 1\n"
+    assert GRAMMAR.remove_directive(source, "a") == source
