@@ -264,6 +264,8 @@ class Vocabulary:
 
     def replace(self, key: str, **changes: Any) -> Vocabulary:
         """This vocabulary with annotation *key* changed, e.g. given a validator."""
+        if key not in {a.key for a in self.annotations}:
+            raise KeyError(key)  # a misspelt key would change nothing
         return Vocabulary(
             [replace(a, **changes) if a.key == key else a for a in self.annotations],
             cell_effects=self.cell_effects,
