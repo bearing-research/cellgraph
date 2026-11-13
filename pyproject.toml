@@ -48,6 +48,9 @@ dev = [
 testpaths = ["tests"]
 timeout = 120
 timeout_method = "thread"
+# No runtime dependencies: a warning is cellgraph's own or Python's (an ast deprecation
+# on a new release), and either is ours to fix.
+filterwarnings = ["error"]
 
 [tool.ty.environment]
 python-version = "3.12"
