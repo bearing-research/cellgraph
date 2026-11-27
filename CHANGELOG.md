@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Call readers: a host's rules for names a call reads that its code does not show
+  (#28). `PythonAnalyzer(call_readers=[...])` takes them, and each name one gives
+  is read at its call as a bare name written there would be, in function bodies
+  too, so it reaches the graph and the execution key. cellgraph knows no library
+  and registers no reader. A reader that fails is the warning
+  `python_call_reader_failed`. `string_literal` and `at_names` are for writing
+  readers, such as one for pandas' `query` and `eval`.
+
 ## 0.4.0 - 2026-11-06
 
 - docs/api.md says what the pre-release audit found missing or wrong (#23):
