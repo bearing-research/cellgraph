@@ -19,6 +19,46 @@
   - A non-canonical `env_hash` is a `TypeError` on every path, where an
     `Unavailable` or `HostKeyed` result returned without one.
 
+- Directives and vocabularies, from an audit:
+  - A directive line with a long run of whitespace in its value parses in linear
+    time; the pattern backtracked quadratically, so one line could hold `analyze`
+    for seconds. A subclass's own `directive_re` is untouched.
+  - `set_directive` refuses a key the grammar would not read back as itself
+    (`per-variant` reads as `per`) and a value with a line break inside it
+    (`ValueError`), and a non-str one (`TypeError`), where they wrote body lines
+    or a directive that parsed back as another key. A break at the value's edge
+    is stripped, as before.
+  - `set_directive` and `remove_directive` keep each line's own ending, where any
+    CRLF turned every line CRLF, and return the source unchanged when nothing
+    matches. Removing a cell's only directive leaves `""`, not a blank line.
+  - A leading byte-order mark no longer hides the first line's directive, an edit
+    keeps it first, and the Python analyzer reads past it, where it was a
+    `syntax_error`.
+  - `Vocabulary.set_directive` refuses a key the cell's language does not read,
+    and `remove_directive` leaves one alone, where they edited lines `analyze`
+    reads as body (a markdown heading).
+  - An annotation key, and each `also_reads` key, must be non-empty, lower-case
+    and without whitespace (`ValueError`), and `also_reads` a sequence of str
+    (`TypeError`), where `Annotation("Tag")` could never match and
+    `also_reads="until"` read `u`, `n`, `t`, `i`, `l`. What else a key may hold
+    is the grammar's to say: a vocabulary refuses a key its grammar does not read
+    back (`Grammar.reads_key`), as `@my-tag` reads as `@my`. A vocabulary must
+    hold `Annotation`s and a `Grammar`.
+  - Vocabularies with different grammars are no longer equal (the grammar is
+    not hashed, so one with state of its own still hashes), `vocab | x` for a
+    non-vocabulary is a `TypeError`, and `vocab.replace(key, /, key=...)` renames
+    an annotation.
+  - `stacked(item)` turns a line `item` cannot read into an error on that line and
+    keeps the others, where the exception reached `analyze`'s caller; an
+    `ExceptionGroup` of them is an error on that line too, where it dropped every
+    line.
+  - An `in_key` annotation whose parser returns a `Partial` with errors is
+    `unkeyed`. Its key field held only the lines it read, so the cell shared its
+    key with one that lacked the unreadable lines.
+  - `Partial` refuses an error that is not an `AnnotationError`, and a validator
+    may return None; both crashed `analyze`.
+  - An effect's names must be str: `Binds(b"xy")` was `(120, 121)`.
+
 - Call readers: a host's rules for names a call reads that its code does not show
   (#28). `PythonAnalyzer(call_readers=[...])` takes them, and each name one gives
   is read at its call as a bare name written there would be, in function bodies

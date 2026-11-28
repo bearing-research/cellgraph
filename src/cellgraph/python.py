@@ -1081,6 +1081,7 @@ def analyze_cell(source: str, *, call_readers: Sequence[CallReader] = ()) -> Cel
     bare name written there would be; in a function body, unless that function binds
     it, it is read from the module.
     """
+    source = source.removeprefix("\ufeff")  # a byte-order mark is not code
     if not source or not source.strip():
         return CellNames(defines=[], references=[])
 

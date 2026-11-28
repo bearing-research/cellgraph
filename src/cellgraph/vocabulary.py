@@ -17,7 +17,12 @@ from typing import TYPE_CHECKING, Any
 from cellgraph.diagnostics import Diagnostic
 from cellgraph.effects import Effect
 from cellgraph.grammar import GRAMMAR, Directive, Grammar
-from cellgraph.languages import LanguageAnalyzer, comment_marker, get_language_analyzer
+from cellgraph.languages import (
+    LanguageAnalyzer,
+    comment_marker,
+    directive_keys,
+    get_language_analyzer,
+)
 
 if TYPE_CHECKING:
     from cellgraph.analysis import Cell
@@ -40,8 +45,9 @@ class AnnotationError(ValueError):
 class Partial:
     """What a parser returns when part of an annotation reads: the value, and the errors.
 
-    The annotation is present with ``value`` (its effects and key field apply) and
-    each error becomes a diagnostic, so the cell is not plannable. For lines that
+    The annotation is present with ``value`` (its effects apply) and each error becomes
+    a diagnostic, so the cell is not plannable. With errors, an ``in_key`` annotation is
+    unkeyed: its value cannot tell the cell from one without the unread lines. For lines that
     cannot be read beside lines that can, as Strata keeps the readable ones.
     """
 
@@ -49,8 +55,12 @@ class Partial:
     errors: tuple[AnnotationError, ...]
 
     def __init__(self, value: Any, errors: Iterable[AnnotationError]) -> None:
+        errors = tuple(errors)
+        for error in errors:
+            if not isinstance(error, AnnotationError):
+                raise TypeError(f"a Partial's errors must be AnnotationErrors, not {error!r}")
         object.__setattr__(self, "value", value)
-        object.__setattr__(self, "errors", tuple(errors))
+        object.__setattr__(self, "errors", errors)
 
 
 @dataclass(frozen=True)
@@ -112,11 +122,55 @@ def flag() -> Parser:
     return parse
 
 
-def stacked(item: Callable[[Directive], Any]) -> Parser:
-    """One value per directive line, in source order; the lines may repeat."""
+def _on_line(exc: AnnotationError, line: int) -> AnnotationError:
+    """A copy of *exc* on *line* unless it names its own: *item* may raise one error
+    for every bad line."""
+    # Not ``copy.copy``: that calls ``__init__``, which a subclass may give more
+    # parameters. ``__new__`` sets ``args`` alone; the attributes come over as they are.
+    err = type(exc).__new__(type(exc), *exc.args)
+    err.__dict__.update(exc.__dict__)
+    err.line = exc.line if exc.line is not None else line
+    err.__cause__ = exc.__cause__
+    err.__traceback__ = exc.__traceback__
+    return err
 
-    def parse(directives: list[Directive]) -> list[Any]:
-        return [item(directive) for directive in directives]
+
+def _leaves(group: BaseException | None) -> Iterator[AnnotationError]:
+    if isinstance(group, BaseExceptionGroup):
+        for exc in group.exceptions:
+            yield from _leaves(exc)
+    elif isinstance(group, AnnotationError):
+        yield group
+
+
+def stacked(item: Callable[[Directive], Any]) -> Parser:
+    """One value per directive line, in source order; the lines may repeat.
+
+    A line *item* cannot read (it raises ``AnnotationError`` or a conversion error) is
+    an error on that line; the others are kept, as a ``Partial``.
+    """
+
+    def parse(directives: list[Directive]) -> Any:
+        values: list[Any] = []
+        errors: list[AnnotationError] = []
+        for directive in directives:
+            try:
+                values.append(item(directive))
+            except AnnotationError as exc:
+                errors.append(_on_line(exc, directive.line))
+            except ExceptionGroup as group:
+                found, rest = group.split(AnnotationError)
+                if rest is not None:
+                    raise
+                errors.extend(_on_line(exc, directive.line) for exc in _leaves(found))
+            except CONVERSION_ERRORS as exc:
+                errors.append(
+                    AnnotationError(
+                        f"`@{directive.key} {directive.value}` could not be read: {exc}",
+                        line=directive.line,
+                    )
+                )
+        return Partial(values, errors) if errors else values
 
     return mark_stacked(parse)
 
@@ -156,6 +210,24 @@ class Annotation:
     validate: Validator | None = None
     also_reads: tuple[str, ...] = ()
 
+    def __post_init__(self) -> None:
+        if isinstance(self.also_reads, (str, bytes)):
+            raise TypeError(f"also_reads must be a sequence of keys, not {self.also_reads!r}")
+        also_reads = tuple(self.also_reads)  # once: an iterator is read only once
+        if not all(isinstance(key, str) for key in also_reads):
+            raise TypeError(f"also_reads must be a sequence of keys, not {also_reads!r}")
+        object.__setattr__(self, "also_reads", also_reads)
+        for key in self.keys:
+            if not isinstance(key, str):
+                raise TypeError(f"an annotation key must be a str, not {key!r}")
+            # A grammar reads directive keys lower-cased; what else a key may hold is
+            # the grammar's to say (Quarto's ``fig-cap``).
+            if not key or key != key.lower() or any(c.isspace() for c in key):
+                raise ValueError(
+                    f"an annotation key must be non-empty, lower-case and without "
+                    f"whitespace, not {key!r}"
+                )
+
     @property
     def keys(self) -> tuple[str, ...]:
         """Every directive key this annotation reads."""
@@ -174,7 +246,9 @@ class Vocabulary:
 
     annotations: tuple[Annotation, ...] = ()
     cell_effects: CellEffects | None = None
-    grammar: Grammar = field(default=GRAMMAR, compare=False)
+    # Compared, so two vocabularies that read directives differently are not equal; not
+    # hashed, since a grammar subclass with state of its own may not hash.
+    grammar: Grammar = field(default=GRAMMAR, hash=False)
 
     def __init__(
         self,
@@ -182,9 +256,21 @@ class Vocabulary:
         cell_effects: CellEffects | None = None,
         grammar: Grammar = GRAMMAR,
     ) -> None:
+        annotations = tuple(annotations)
+        if not all(isinstance(a, Annotation) for a in annotations):
+            raise TypeError(f"a vocabulary holds Annotations, not {annotations!r}")
+        if cell_effects is not None and not callable(cell_effects):
+            raise TypeError(f"cell_effects must be callable, not {cell_effects!r}")
+        if not isinstance(grammar, Grammar):
+            raise TypeError(f"grammar must be a Grammar, not {grammar!r}")
         seen: dict[str, str] = {}
         for annotation in annotations:
             for key in annotation.keys:
+                if not grammar.reads_key(key):
+                    raise ValueError(
+                        f"directive key {key!r} of @{annotation.key} is not one this "
+                        "vocabulary's grammar reads"
+                    )
                 if key in seen:
                     raise ValueError(
                         f"directive key {key!r} is claimed by both @{seen[key]} and "
@@ -208,6 +294,8 @@ class Vocabulary:
         A custom grammar on one side is kept; one on each side is refused unless the
         two are equal (``Grammar.__eq__``), and then the left one is kept.
         """
+        if not isinstance(other, Vocabulary):
+            return NotImplemented
         custom = [g for g in (self.grammar, other.grammar) if g != GRAMMAR]
         if len(custom) == 2 and custom[0] != custom[1]:
             raise ValueError("both vocabularies have their own grammar")
@@ -231,6 +319,7 @@ class Vocabulary:
         return iter(self.annotations)
 
     def __contains__(self, key: object) -> bool:
+        """Whether an annotation is named *key*; an ``also_reads`` key is in ``keys``."""
         return any(annotation.key == key for annotation in self.annotations)
 
     def __getitem__(self, key: str) -> Annotation:
@@ -262,7 +351,7 @@ class Vocabulary:
             grammar=self.grammar,
         )
 
-    def replace(self, key: str, **changes: Any) -> Vocabulary:
+    def replace(self, key: str, /, **changes: Any) -> Vocabulary:
         """This vocabulary with annotation *key* changed, e.g. given a validator."""
         if key not in {a.key for a in self.annotations}:
             raise KeyError(key)  # a misspelt key would change nothing
@@ -285,17 +374,33 @@ class Vocabulary:
         that passes its own ``analyzers=`` table. Refused for a stacked annotation's
         key, which a single-line edit would truncate.
         """
+        if not isinstance(key, str):
+            raise TypeError(f"a directive key must be a str, not {key!r}")
         owner = self.owner(key.lower())
         if owner is not None and is_stacked(owner.parse):
             raise ValueError(f"@{key} is repeatable; edit the cell source directly")
-        return self._edit_grammar(language).set_directive(source, key, value)
+        analyzer = _analyzer(language)
+        read = directive_keys(analyzer)
+        if read is not None and key.lower() not in read:
+            # The line would be body text the analysis never reads as @key.
+            raise ValueError(f"the cell's language does not read @{key}")
+        return self.grammar_for(analyzer).set_directive(source, key, value)
 
     def remove_directive(
         self, source: str, key: str, *, language: str | LanguageAnalyzer = "python"
     ) -> str:
-        """*source* with every ``@key`` directive removed from its leading block."""
-        return self._edit_grammar(language).remove_directive(source, key)
+        """*source* with every ``@key`` directive removed from its leading block.
 
-    def _edit_grammar(self, language: str | LanguageAnalyzer) -> Grammar:
-        analyzer = get_language_analyzer(language) if isinstance(language, str) else language
-        return self.grammar_for(analyzer)
+        A key the language does not read is body text, which stays.
+        """
+        if not isinstance(key, str):
+            raise TypeError(f"a directive key must be a str, not {key!r}")
+        analyzer = _analyzer(language)
+        read = directive_keys(analyzer)
+        if read is not None and key.lower() not in read:
+            return source
+        return self.grammar_for(analyzer).remove_directive(source, key)
+
+
+def _analyzer(language: str | LanguageAnalyzer) -> LanguageAnalyzer:
+    return get_language_analyzer(language) if isinstance(language, str) else language

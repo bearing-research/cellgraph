@@ -20,6 +20,26 @@ from dataclasses import dataclass
 _OTHER_BREAKS = re.compile("[\x0b\x0c\x1c-\x1e\x85\u2028\u2029]")
 
 
+# A line and its own ending, so an edit keeps every line ending as it was.
+_LINE = re.compile(r"[^\r\n]*(?:\r\n|\r|\n)|[^\r\n]+\Z")
+_BOM = "\ufeff"
+
+
+def _lines_with_ends(source: str) -> list[tuple[str, str]]:
+    """*source*'s lines with their endings: ``("x = 1", "\r\n")``; the last may have none."""
+    pairs = []
+    for match in _LINE.finditer(source):
+        text = match.group()
+        line = text.rstrip("\r\n")
+        pairs.append((line, text[len(line) :]))
+    return pairs
+
+
+def _without_bom(source: str) -> str:
+    """*source* without a leading byte-order mark, which hides the first line's ``#``."""
+    return source[1:] if source.startswith(_BOM) else source
+
+
 def source_lines(source: str) -> list[str]:
     """*source*'s lines, split at ``\n``, ``\r\n`` and ``\r`` as Python splits them."""
     lines = source.replace("\r\n", "\n").replace("\r", "\n").split("\n")
@@ -51,6 +71,13 @@ def check_marker(marker: object) -> str:
     return marker
 
 
+def _edit_key(key: object) -> str:
+    """*key* lower-cased, as an edit writes and finds it."""
+    if not isinstance(key, str):
+        raise TypeError(f"a directive key must be a str, not {key!r}")
+    return key.lower()
+
+
 class Grammar:
     """The ``<marker> @key value`` syntax of a cell's leading comment block.
 
@@ -61,7 +88,9 @@ class Grammar:
     # Class-level defaults, so a subclass's own ``directive_re`` and a subclass
     # ``__init__`` that skips ours both keep working as they did in 0.3.0.
     marker: str = "#"
-    directive_re: re.Pattern[str] = re.compile(r"^#\s*@(\w+)\s*(.*?)\s*$")
+    # Greedy, on a stripped line: a lazy value with a trailing ``\s*`` backtracks in
+    # quadratic time over a run of whitespace.
+    directive_re: re.Pattern[str] = re.compile(r"^#\s*@(\w+)\s*(.*)$")
 
     def __init__(self, marker: str = "#") -> None:
         if check_marker(marker) != self.marker:
@@ -96,7 +125,7 @@ class Grammar:
 
     def _set_marker(self, marker: str) -> None:
         self.marker = check_marker(marker)
-        self.directive_re = re.compile(rf"^{re.escape(marker)}\s*@(\w+)\s*(.*?)\s*$")
+        self.directive_re = re.compile(rf"^{re.escape(marker)}\s*@(\w+)\s*(.*)$")
 
     def block(self, source: str) -> Iterator[tuple[int, str]]:
         """Yield ``(1-based lineno, raw_line)`` for the leading comment block.
@@ -104,13 +133,19 @@ class Grammar:
         The block is the first contiguous run of blank lines and lines that start
         with the marker; blank lines are not yielded.
         """
-        for lineno, line in enumerate(source_lines(source), start=1):
+        for lineno, line in enumerate(source_lines(_without_bom(source)), start=1):
             stripped = line.strip()
             if not stripped:
                 continue
             if not self._in_block(stripped):
                 break
             yield lineno, line
+
+    def reads_key(self, key: str) -> bool:
+        """Whether a directive this grammar writes for *key* reads back as *key*: under
+        the default pattern ``per-variant`` reads as ``per``, and ``""`` as none."""
+        parsed = self.parse_directive(self._format(key, "v"))
+        return parsed is not None and parsed[0] == key
 
     def parse_directive(self, line: str) -> tuple[str, str] | None:
         """Match one ``<marker> @key value`` line: ``(key.lower(), value)``, or ``None``."""
@@ -130,7 +165,7 @@ class Grammar:
 
     def strip(self, source: str) -> str:
         """Return *source* with the leading comment block removed."""
-        lines = source_lines(source)
+        lines = source_lines(_without_bom(source))
         for i, line in enumerate(lines):
             stripped = line.strip()
             if not stripped or self._in_block(stripped):
@@ -144,7 +179,7 @@ class Grammar:
         With *keys*, only those keys' lines go. Other comments stay: they are the
         body's, for its normalizer to judge.
         """
-        lines = source_lines(source)
+        lines = source_lines(_without_bom(source))
         end = self._block_end(lines)
 
         def is_directive(line: str) -> bool:
@@ -158,39 +193,71 @@ class Grammar:
         """Return *source* with a single ``<marker> @key value`` directive set.
 
         Replaces the first ``<marker> @key`` in the leading block and drops duplicates; when
-        absent, inserts after the last directive (or at the top).
+        absent, inserts after the last directive (or at the top). Every other line, and
+        its line ending, is kept. A *key* this grammar would not read back as itself,
+        or a *value* with a line break inside it, is a ``ValueError``: either would
+        write another line than one directive.
         """
-        key = key.lower()
-        new_line = self._format(key, value)
-        sep = self._line_sep(source)
-        lines = source_lines(source)
-        end = self._block_end(lines)
+        key = _edit_key(key)
+        if not isinstance(value, str):
+            raise TypeError(f"a directive value must be a str, not {value!r}")
+        inner = value.strip()  # ``_format`` strips the value, so an outer break is fine
+        if "\n" in inner or "\r" in inner or _OTHER_BREAKS.search(inner):
+            raise ValueError(f"a directive value must be one line, not {value!r}")
+        if not self.reads_key(key):
+            raise ValueError(f"{key!r} is not a directive key this grammar reads back")
+        new_line = self._format(key, inner)
+        bom, body = (_BOM, source[1:]) if source.startswith(_BOM) else ("", source)
+        pairs = _lines_with_ends(body)
+        end = self._block_end([line for line, _ in pairs])
 
-        matches = [i for i in range(end) if (d := self.parse_directive(lines[i])) and d[0] == key]
+        matches = [
+            i for i in range(end) if (d := self.parse_directive(pairs[i][0])) and d[0] == key
+        ]
         if matches:
-            lines[matches[0]] = new_line
+            first = matches[0]
+            pairs[first] = (new_line, pairs[first][1])
             for i in reversed(matches[1:]):
-                del lines[i]
+                self._drop(pairs, i)
         else:
-            directives = [i for i in range(end) if self.parse_directive(lines[i])]
-            lines.insert(directives[-1] + 1 if directives else 0, new_line)
-
-        result = sep.join(lines)
-        return result + sep if source.endswith(("\n", "\r")) else result
+            directives = [i for i in range(end) if self.parse_directive(pairs[i][0])]
+            at = directives[-1] + 1 if directives else 0
+            sep = self._line_sep(body)
+            if at == len(pairs):
+                if pairs and not pairs[-1][1]:
+                    pairs[-1] = (pairs[-1][0], sep)  # the old last line now has one after it
+                pairs.append((new_line, sep if body.endswith(("\n", "\r")) else ""))
+            else:
+                neighbour = pairs[at - 1][1] if at else pairs[at][1]
+                pairs.insert(at, (new_line, neighbour or sep))
+        result = bom + "".join(line + ending for line, ending in pairs)
+        return source if result == source else result
 
     def remove_directive(self, source: str, key: str) -> str:
-        """Return *source* with every ``<marker> @key`` directive removed from the block."""
-        key = key.lower()
-        sep = self._line_sep(source)
-        lines = source_lines(source)
-        end = self._block_end(lines)
-        kept = [
-            line
-            for i, line in enumerate(lines)
-            if not (i < end and (d := self.parse_directive(line)) is not None and d[0] == key)
+        """Return *source* with every ``<marker> @key`` directive removed from the block.
+
+        Every other line keeps its line ending; *source* is returned as it was when it
+        has no such directive.
+        """
+        key = _edit_key(key)
+        bom, body = (_BOM, source[1:]) if source.startswith(_BOM) else ("", source)
+        pairs = _lines_with_ends(body)
+        end = self._block_end([line for line, _ in pairs])
+        matches = [
+            i for i in range(end) if (d := self.parse_directive(pairs[i][0])) and d[0] == key
         ]
-        result = sep.join(kept)
-        return result + sep if source.endswith(("\n", "\r")) else result
+        if not matches:
+            return source
+        for i in reversed(matches):
+            self._drop(pairs, i)
+        return bom + "".join(line + ending for line, ending in pairs)
+
+    @staticmethod
+    def _drop(pairs: list[tuple[str, str]], index: int) -> None:
+        """Remove line *index*; a last line without an ending leaves the new last one so."""
+        _, ending = pairs.pop(index)
+        if index == len(pairs) and pairs and not ending:
+            pairs[-1] = (pairs[-1][0], "")
 
     def _block_end(self, lines: list[str]) -> int:
         """Index of the first body line: the end of the leading comment block."""
@@ -210,10 +277,11 @@ class Grammar:
 
     @staticmethod
     def _line_sep(source: str) -> str:
-        """The dominant line ending, so a splice preserves CRLF, CR or LF."""
-        if "\r\n" in source:
-            return "\r\n"
-        return "\r" if "\r" in source else "\n"
+        """The most common line ending, for a line that has no neighbour's to take."""
+        endings = [ending for _, ending in _lines_with_ends(source) if ending]
+        if not endings:
+            return "\n"
+        return max(("\n", "\r\n", "\r"), key=endings.count)
 
 
 GRAMMAR = Grammar()
