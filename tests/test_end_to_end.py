@@ -604,3 +604,124 @@ def test_a_variant_may_import_what_its_sibling_does_not(run):
     # A name a variant imports and assigns is part of its contract.
     analysis = run("# @variant g small\nimport math\nmath = 1\nm = 1", "# @variant g big\nm = 2")
     assert "variant_contract_mismatch" in codes(analysis)
+
+
+# --- what an upstream makes, whoever the cell reads a name from -----------------
+
+
+def test_a_cell_id_with_a_dot_cannot_pass_for_another_output(vocab):
+    # ``a``'s ``x.y`` and ``a.x``'s ``y`` would both be ``output:a.x.y``.
+    cells = [cg.Cell("a", "# @out x.y\nz = 1"), cg.Cell("a.x", "# @out y\nw = 1")]
+    analysis = cg.analyze([*cells, cg.Cell("R", "r = z + w")], vocab)
+
+    def key(first, second):
+        return analysis.execution_key(
+            "R",
+            published=published(a=out(**{"x.y": first, "z": "Z"}), **{"a.x": out(y=second, w="W")}),
+            env_hash=ENV,
+        )
+
+    assert key("P", "Q").digest != key("Q", "P").digest
+    assert "output:a%2Ex.y" in [address for address, _ in key("P", "Q").parts["upstream"]]
+
+
+def test_an_output_shadowed_by_a_later_cell_is_keyed_as_its_instances(run):
+    # The cell reads ``score`` from c3; c2's own ``score`` still counts, as its instances,
+    # not as whichever instance the host stored last.
+    analysis = run(
+        *MEMBERS, "# @per_variant\nscore = m\nt = m", "score = 0", "print(score, t)", groups=SWEEP
+    )
+    instances = {
+        (v, n): cg.OutputRef(cg.Provenance(f"{v}{n}"))
+        for v in ("score", "t")
+        for n in ("big", "small")
+    }
+
+    def key(last):
+        outputs = {v: instances[(v, last)] for v in ("score", "t")}
+        snapshot = cg.Published(outputs=outputs, instances=instances)
+        return analysis.execution_key(
+            "c4", published=published(c2=snapshot, c3=out(score="s3")), env_hash=ENV
+        )
+
+    assert key("small").digest == key("big").digest
+    assert "instances:c2.score" in [address for address, _ in key("big").parts["upstream"]]
+    assert analysis.variant_read("c4", "c2", "score") == cg.VariantRead(
+        ("big", "small"), False, True
+    )
+
+
+def test_an_instance_leaves_out_the_other_variants_shadowed_output(run):
+    analysis = run(*WITH_Y, "y = 99", "# @per_variant\nr = m + y", groups=SWEEP)
+
+    def key(big_y):
+        upstream = published(c0=out(m="h0", y="y0"), c1=out(m="h1", y=big_y), c2=out(y="y2"))
+        return analysis.execution_key("c3", instance="small", published=upstream, env_hash=ENV)
+
+    assert key("y1").digest == key("other").digest
+
+
+def test_a_seed_from_a_fan_out_cell_reads_its_instances(run):
+    analysis = run(
+        *MEMBERS, "# @per_variant\nr = m", "r = 0", "# @seed c2 r\nprint(r)", groups=SWEEP
+    )
+    assert analysis.variant_read("c4", "c2", "r") == cg.VariantRead(("big", "small"), False, True)
+    key = analysis.execution_key(
+        "c4",
+        published=published(c2=fanned("r", small="rs", big="rb"), c3=out(r="r3")),
+        env_hash=ENV,
+    )
+    assert [address for address, _ in key.parts["upstream"]] == ["instances:c2.r"]
+
+
+def test_an_item_key_leaves_out_only_the_source_it_stands_in_for(run):
+    analysis = run(
+        "items = [1]\nother = 1", "items = [2]", "# @each item in items\nr = item + other"
+    )
+    item = cg.Item("a", "d")
+
+    def key(first_items):
+        upstream = published(c0=out(items=first_items, other="o"), c1=out(items="i1"))
+        return analysis.execution_key("c2", instance=item, published=upstream, env_hash=ENV)
+
+    # c0's ``items`` is not the source (c1's is), so it counts like any unread output.
+    assert key("i0").digest != key("other").digest
+    assert "output:c1.items" not in [address for address, _ in key("i0").parts["upstream"]]
+
+
+@pytest.mark.parametrize("env", [object(), ("t",), float("nan")])
+def test_a_non_canonical_env_hash_is_a_type_error_on_every_path(run, env):
+    analysis = run("x = 1", "y = x")
+    gone = published(c0=out(x=cg.Unavailable("gone")))
+    with pytest.raises(TypeError, match="env_hash"):
+        analysis.execution_key("c1", published=gone, env_hash=env)
+
+
+def test_a_non_canonical_env_hash_is_a_type_error_for_a_host_keyed_cell(vocab):
+    class HostKeys(cg.PythonAnalyzer):
+        owns_key = False
+
+    analysis = cg.analyze(
+        [cg.Cell("p", "x = 1"), cg.Cell("q", "y = x", language="hosted")],
+        vocab,
+        analyzers={"python": cg.PythonAnalyzer(), "hosted": HostKeys()},
+    )
+    with pytest.raises(TypeError, match="env_hash"):
+        analysis.execution_key("q", published=published(p=out(x="h")), env_hash=object())  # ty: ignore[invalid-argument-type]
+
+
+def test_an_item_key_leaves_out_a_source_a_sweep_makes(run):
+    analysis = run(
+        "# @variant g small\nitems = [1]",
+        "# @variant g big\nitems = [2]",
+        "# @each item in items\nr = item",
+        groups=SWEEP,
+    )
+
+    def key(small_items):
+        upstream = published(c0=out(items=small_items), c1=out(items="ib"))
+        return analysis.execution_key(
+            "c2", instance=cg.Item("a", "d"), published=upstream, env_hash=ENV
+        )
+
+    assert key("is").digest == key("other").digest
