@@ -364,7 +364,8 @@ it, so check `dag.inactive_cells` first.
 
 `CellAnalysis` carries, among others:
 
-- `annotations` (the parsed values), `effects`, `defines`, `references`,
+- `annotations` (the parsed values), `annotation_keys` (each present annotation's
+  directive keys, `also_reads` included), `effects`, `defines`, `references`,
   `builtin_references`, `bound`, `inputs`, `nocache`;
 - `key_fields`, `unkeyed`, `diagnostics`, `plannable`, `blocked_by`;
 - `normalized` and `definition_key`, for every cell.
@@ -584,5 +585,6 @@ diagnostics of any code and severity, and a language analyzer add its own throug
 `Analyzed.diagnostics` (see Languages), so a host's table of codes has room for
 those of its own vocabulary and analyzers.
 
-An `@after` problem is on the first `@after` line that names the id. A conflict or
+An `@after` problem is on the first line of the ordering annotation's keys
+(`also_reads` included) that names the id. A conflict or
 seed error is on the first line of the annotation whose effect caused it.

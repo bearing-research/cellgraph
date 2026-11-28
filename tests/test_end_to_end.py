@@ -725,3 +725,130 @@ def test_an_item_key_leaves_out_a_source_a_sweep_makes(run):
         )
 
     assert key("is").digest == key("other").digest
+
+
+# --- graph fixes from the audit ---------------------------------------------------------
+
+
+def test_every_sweep_member_refining_its_variable_reads_what_came_before(run):
+    analysis = run(
+        "x = 0",
+        "# @variant s p\nx = x + 1",
+        "# @variant s q\nx = x + 2",
+        groups=cg.GroupConfig(modes={"s": "sweep"}),
+    )
+    assert ("c0", "c1", "x") in edges(analysis)
+    assert ("c0", "c2", "x") in edges(analysis)
+    assert analysis.plan("c2", ready=lambda _: False) == ["c0", "c2"]
+
+
+def test_a_reader_between_two_sweeps_of_one_name_reads_the_earlier(run):
+    groups = cg.GroupConfig(modes={"g": "sweep", "h": "sweep"})
+    analysis = run(
+        "# @variant g a\ny = 1",
+        "# @variant g b\ny = 2",
+        "# @per_variant\nr = y",
+        "# @variant h c\ny = 3",
+        "# @variant h d\ny = r",
+        groups=groups,
+    )
+    assert analysis.graph.read_producer("c2", "y").group == "g"
+    assert analysis.graph.fanout_cells["c2"].group == "g"
+    assert "cycle" not in codes(analysis)
+
+
+def test_a_seeded_fan_out_chains(run):
+    analysis = run(
+        *MEMBERS,
+        "# @per_variant\nr = m",
+        "r = 0",
+        "# @per_variant\n# @seed c2 r\nt = r",
+        groups=SWEEP,
+    )
+    assert analysis.graph.fanout_cells["c4"].group == "g"
+    assert "per_variant_no_sweep_source" not in codes(analysis)
+
+
+def test_one_edge_per_wired_variable(run):
+    analysis = run(*MEMBERS, "# @per_variant\nr = m", "t = r", groups=SWEEP)
+    assert [e for e in analysis.graph.edges if e.to_cell_id == "c3"] == [
+        cg.DagEdge("c2", "c3", "r")
+    ]
+
+
+def test_an_inactive_member_that_also_runs_per_item_is_an_error(run):
+    analysis = run(
+        "items = [1]",
+        "# @variant g a\nr = 1",
+        "# @variant g b\n# @each it in items\nr = it",
+        groups=cg.GroupConfig(active={"g": "a"}),
+    )
+    assert [(d.cell, d.code) for d in analysis.diagnostics] == [("c2", "each_on_variant_member")]
+    assert not analysis.cells["c2"].plannable
+
+
+def test_an_after_problem_is_on_the_line_that_names_it_through_also_reads():
+    def after(directives):
+        return [token for d in directives for token in d.value.split()]
+
+    vocab = cg.Vocabulary(
+        [
+            cg.Annotation(
+                "dep",
+                parse=after,
+                also_reads=("depends",),
+                in_key=False,
+                effects=lambda ids: [cg.After(ids)],
+            )
+        ]
+    )
+    analysis = cg.analyze([cg.Cell("c1", "# @depends zz\n# @depends c1\ny = 1")], vocab)
+    assert [(d.code, d.line) for d in analysis.diagnostics] == [
+        ("after_unknown_cell", 1),
+        ("after_self", 2),
+    ]
+
+
+def test_a_member_reading_its_groups_variable_it_does_not_make_reads_outside(run):
+    groups = cg.GroupConfig(modes={"s": "sweep"})
+    analysis = run("x = 0", "# @variant s p\nx = x + 1", "# @variant s q\ny = x", groups=groups)
+    assert analysis.graph.read_producer("c2", "x") == "c0"
+    assert ("c1", "c2", "x") not in edges(analysis)
+
+
+def test_a_member_after_a_redefinition_reads_the_latest_outside_value(run):
+    groups = cg.GroupConfig(modes={"s": "sweep"})
+    analysis = run(
+        "x = 0", "# @variant s p\nx = x + 1", "x = 10", "# @variant s q\nx = x + 2", groups=groups
+    )
+    assert analysis.graph.read_producer("c1", "x") == "c0"
+    assert analysis.graph.read_producer("c3", "x") == "c2"
+
+
+def test_a_seed_from_a_later_fan_out_cell_is_read_as_its_instances(run):
+    analysis = run(*MEMBERS, "# @seed c3 r\nt = r", "# @per_variant\nr = m", groups=SWEEP)
+    assert analysis.graph.read_producer("c2", "r") == analysis.graph.fanout_cells["c3"]
+
+
+def test_an_each_over_a_seeded_fan_out_is_over_a_sweep(run):
+    for order in ((2, 3), (3, 2)):
+        sources = dict(
+            zip(order, ("# @per_variant\nr = m", "# @seed c{} r\n# @each it in r\nz = it"))
+        )
+        each_at = order[1]
+        sources[each_at] = sources[each_at].format(order[0])
+        analysis = run(*MEMBERS, sources[2], sources[3], groups=SWEEP)
+        assert codes(analysis, f"c{each_at}") == ["each_over_sweep"]
+
+
+def test_an_inactive_member_reports_what_does_not_depend_on_the_selection(run):
+    analysis = run(
+        "# @variant g a\nr = 1",
+        "# @variant g b\n# @after zz\n# @after c1\n# @seed nope q\nr = q",
+        groups=cg.GroupConfig(active={"g": "a"}),
+    )
+    assert sorted(codes(analysis, "c1")) == [
+        "after_self",
+        "after_unknown_cell",
+        "seed_unknown_cell",
+    ]
