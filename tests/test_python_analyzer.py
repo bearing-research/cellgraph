@@ -862,3 +862,101 @@ class TestImports:
     )
     def test_imports(self, source, imports):
         assert analyze_cell(source).imports == imports
+
+
+class TestAuditFixes:
+    """Reads that Python makes at runtime and the analyzer missed (an audit's finds)."""
+
+    @pytest.mark.parametrize(
+        ("source", "references"),
+        [
+            # PEP 709: symtable calls a comprehension's loop target the function's local.
+            (
+                "def small(data):\n    squares = [n * n for n in range(5)]\n"
+                "    return [v for v in data if v < n]",
+                ["n"],
+            ),
+            ("def f():\n    return [y for c in [y for y in r]]", ["r", "y"]),
+            (
+                "class C:\n    def m(self):\n        rows = [row for row in data]\n"
+                "        return [row for _ in cols]",
+                ["cols", "data", "row"],
+            ),
+            ("def f():\n    [n for n in r]\n    def g():\n        return n", ["n", "r"]),
+            ("def f():\n    g = lambda: [n for n in r] + [n]", ["n", "r"]),
+            # ... but not when the function, or one around it, binds the name.
+            ("def f(n):\n    [n for n in r]\n    return n", ["r"]),
+            ("def f():\n    n = 1\n    [n for n in r]\n    def g():\n        return n", ["r"]),
+            ("def f():\n    return [n for n in r]", ["r"]),
+            # A class body in a function reads a name it binds from the module.
+            ("def make():\n    class Config:\n        threshold = threshold", ["threshold"]),
+            ("def f():\n    class C:\n        n = 1\n        v = [n for _ in r]", ["n", "r"]),
+            ("def f():\n    n = 2\n    class C:\n        n = 1\n        v = [n for _ in r]", ["r"]),
+            ("def f():\n    x = 1\n    class C:\n        y = x", []),
+            ("def f():\n    class C:\n        x += 1", ["x"]),
+            # A local variable's annotation is never evaluated, on any Python.
+            ("def f():\n    y: Foo = 1\n    return y", []),
+            ("def f():\n    y: Foo\n    return y", []),
+            ("def f():\n    class C:\n        y: Foo = 1", ["Foo"]),
+            # A class's handler name is the class's alone.
+            (
+                "class C:\n    try:\n        pass\n    except E as e:\n"
+                "        msgs = [str(e) for _ in r]",
+                ["E", "e", "r"],
+            ),
+            ("class C:\n    try:\n        pass\n    except E as e:\n        m = e", ["E"]),
+            # ... and a class or method inside the handler reads the module's.
+            (
+                "class A:\n    try:\n        pass\n    except E as e:\n"
+                "        class B:\n            m = e\n"
+                "        def meth(self):\n            return e",
+                ["E", "e"],
+            ),
+            # A class body in a function that mutates or declares nonlocal reads the
+            # function's name.
+            ("def f():\n    d = {}\n    class C:\n        d['k'] = 1", []),
+            ("def f():\n    x = 1\n    class C:\n        nonlocal x\n        x = x + 1", []),
+            # A walrus in a nested def's default binds in the function.
+            (
+                "def f():\n    [n for n in r]\n    def g(a=(n := 1)):\n        pass\n    return n",
+                ["r"],
+            ),
+        ],
+    )
+    def test_reads(self, source, references):
+        assert analyze_cell(source).references == references
+
+    def test_a_comprehensions_subscript_target_is_a_mutation(self):
+        result = analyze_cell("[0 for d[k] in xs]")
+        assert result.references == ["d", "k", "xs"]
+        assert result.mutation_defines == ["d"]
+        result = analyze_cell("[0 for obj.attr in xs]")
+        assert result.references == ["obj", "xs"]
+        assert result.mutation_defines == ["obj"]
+        # In a class, the module's d, whatever the class binds; in a lambda, only read.
+        result = analyze_cell("class C:\n    d = {}\n    v = [0 for d[k] in xs]")
+        assert result.mutation_defines == ["d"]
+        result = analyze_cell("f = lambda: [0 for d[k] in xs]")
+        assert result.references == ["d", "k", "xs"] and result.mutation_defines == []
+        # Its plain names stay the comprehension's.
+        assert analyze_cell("[k for k, d[k] in xs]").references == ["d", "xs"]
+
+    def test_a_reader_whose_text_cannot_be_written_is_still_a_warning(self):
+        class Loud:
+            def __repr__(self):
+                raise RuntimeError("no repr")
+
+        class Shy(Exception):
+            def __str__(self):
+                raise RuntimeError("no str")
+
+        def bad_name(call):
+            return [Loud()]
+
+        def bad_error(call):
+            raise Shy
+
+        for reader in (bad_name, bad_error):
+            result = analyze_cell("f(x)", call_readers=[reader])
+            assert result.references == ["f", "x"]
+            assert len(result.reader_failures) == 1

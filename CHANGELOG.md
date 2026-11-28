@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- The Python analyzer, from an audit, reads what Python reads in these cases:
+  - A name only a list, set or dict comprehension binds, read outside it in a
+    function body: symtable (PEP 709) calls it the function's local, so the module
+    reference was missed (`def f(d): s = [n for n in r]; return [v for v in d if
+    v < n]` reads `n`).
+  - A class body inside a function, which reads a name it also binds (`threshold
+    = threshold`) from the module, and whose comprehensions and lambdas skip the
+    class's names.
+  - A comprehension's subscript or attribute target (`[0 for d[k] in xs]`), which
+    reads and mutates `d` on each pass; in a class body it is the module's `d`,
+    and in a lambda only read.
+  - A comprehension, lambda, method or nested class in a class body's `except E
+    as e` handler, which reads the module's `e`.
+  - A function's local variable annotation (`y: Foo = 1`) is never evaluated, so
+    it reads nothing on any Python; on 3.12 and 3.13 it read `Foo`, and on 3.14
+    it did not.
+  - A call reader whose exception or name cannot be written as text is a warning,
+    where `analyze` raised.
+
 - The graph, from an audit:
   - Every sweep member that reads its group's variable (`x = x + 1`, or `y = x`
     in a member that does not make `x`) reads what the name was outside the
