@@ -207,6 +207,35 @@ still gets names, edges, plannability and plan steps, and `execution_key` return
   long `a + a + ...` can be an error on one and not the other. One whose symbol
   table Python refuses (a module-level `nonlocal`) is the warning
   `python_bodies_unread`, since what its function bodies read is unknown.
+- `PythonAnalyzer(call_readers=())` takes the host's rules for names a call reads
+  that its code does not show, such as `mu` in `df.query("a > @mu")`. A
+  `CallReader` gets each `ast.Call` in the cell and returns the names it reads, or
+  None when the call is not its own. cellgraph knows no library: the analyzer
+  registered on import has no readers, and a host passes its own through
+  `analyze(..., analyzers={"python": PythonAnalyzer(call_readers=[...])})`.
+  - A name a reader gives is read at its call, after the call's arguments, as a
+    bare name written there would be: a comprehension variable or a lambda
+    parameter stays local, a name the cell binds first is its own, and
+    `mu = df.query("@mu")` reads the upstream `mu`. The name reaches the graph
+    and the execution key as any other reference.
+  - In a function or method body it is the module's unless that function binds
+    it. One only an enclosing function binds is the module's too, unless the
+    function's own code uses it: the libraries that read names this way look in
+    the calling frame, which holds an enclosing function's variable only then.
+  - A reader that raises, returns a string, or gives something that is not an
+    identifier is the warning `python_call_reader_failed`, naming the reader; its
+    names for that call are dropped (only the bad ones, for a bad name) and the
+    rest of the cell's analysis stands.
+  - Answers are memoized by source and readers, shared by every analyzer with the
+    same readers, so a reader must depend on the call alone and be hashable. A
+    name is read as Python reads an identifier, NFKC-normalized (`ﬁ` is `fi`). `analyze_cell(source, call_readers=...)` takes readers too, and
+    without them reads none. The key does not record which readers ran: a host
+    that changes its readers versions its own keys.
+- `string_literal(node)` is the text of a plain string literal (implicitly
+  concatenated literals included), None for an f-string or anything else.
+  `at_names(text)` is the identifiers after `@` in *text*, in order and once each,
+  skipping text in `'...'`, `"..."` and backticks. Both are for writing readers;
+  nothing registers them.
 - `registered_analyzers()` is a copy of the registry.
 - `strip_lines` is a ready-made normalizer: trailing whitespace and outer blank
   lines dropped.
@@ -500,6 +529,7 @@ not count in equality.
 | `cycle` | error | `cycle` |
 | `python_too_deep` (the Python analyzer) | error | |
 | `python_bodies_unread` (the Python analyzer) | warn | |
+| `python_call_reader_failed` (the Python analyzer) | warn | |
 
 These are cellgraph's codes. `<key>` is the annotation's key; a parser, encoder or
 validator may raise an `AnnotationError` with its own code instead, as

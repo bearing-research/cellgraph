@@ -68,7 +68,7 @@ from cellgraph.languages import (
     registered_analyzers,
     strip_lines,
 )
-from cellgraph.python import PythonAnalyzer
+from cellgraph.python import CallReader, PythonAnalyzer, at_names, string_literal
 from cellgraph.vocabulary import (
     Annotation,
     AnnotationError,
@@ -96,6 +96,7 @@ __all__ = [
     "Annotation",
     "AnnotationError",
     "Binds",
+    "CallReader",
     "Cell",
     "CellAnalysis",
     "CellEffects",
@@ -139,6 +140,7 @@ __all__ = [
     "VariantRead",
     "Vocabulary",
     "analyze",
+    "at_names",
     "canonical_json",
     "comment_marker",
     "derive_subkey",
@@ -154,5 +156,6 @@ __all__ = [
     "registered_analyzers",
     "scalar",
     "stacked",
+    "string_literal",
     "strip_lines",
 ]

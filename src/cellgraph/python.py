@@ -13,10 +13,12 @@ from __future__ import annotations
 import ast
 import builtins
 import functools
+import keyword
 import symtable
 import sys
 import threading
-from collections.abc import Callable
+import unicodedata
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -46,6 +48,140 @@ class CellNames:
     too_deep: bool = False
     # symtable refused the cell, so what its function bodies read is unknown.
     bodies_unread: bool = False
+    # What went wrong in a call reader, one line each; the names it gave are dropped.
+    reader_failures: list[str] = field(default_factory=list)
+
+
+# The names one call reads that its code does not show (``df.query("a > @mu")`` reads
+# ``mu``), or None when the call is not the reader's. A host supplies these.
+type CallReader = Callable[[ast.Call], Iterable[str] | None]
+
+
+def string_literal(node: ast.expr | None) -> str | None:
+    """The text of *node* when it is a plain string literal, else None.
+
+    Implicitly concatenated literals (``"a" "b"``) are one literal; an f-string is not.
+    """
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return None
+
+
+def at_names(text: str) -> list[str]:
+    """The identifiers after ``@`` in *text*, in order and once each.
+
+    Text in ``'...'``, ``"..."`` or backticks is skipped: there ``@`` is a character,
+    not a name. Space between ``@`` and the name is allowed. A reader for a library
+    that writes names this way (pandas' ``query`` and ``eval``) can use it.
+    """
+    found: dict[str, None] = {}
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch in "'\"`":
+            i = _past_quoted(text, i)
+            continue
+        i += 1
+        if ch != "@":
+            continue
+        while i < n and text[i] in " \t":
+            i += 1
+        start = i
+        if i < n and text[i].isidentifier():
+            i += 1
+            while i < n and ("a" + text[i]).isidentifier():
+                i += 1
+            # As Python reads an identifier: ``ﬁ`` is ``fi``.
+            name = unicodedata.normalize("NFKC", text[start:i])
+            if not keyword.iskeyword(name):
+                found[name] = None
+    return list(found)
+
+
+def _past_quoted(text: str, start: int) -> int:
+    """The index just past the quoted run opening at *start*; the end when it is unclosed."""
+    quote = text[start]
+    i = start + 1
+    while i < len(text):
+        if text[i] == "\\" and quote != "`":
+            i += 2
+            continue
+        if text[i] == quote:
+            return i + 1
+        i += 1
+    return len(text)
+
+
+def _identifier(name: object) -> str | None:
+    """*name* as Python reads it as an identifier (NFKC), or None when it is not one."""
+    if not isinstance(name, str):
+        return None
+    name = unicodedata.normalize("NFKC", name)
+    return name if name.isidentifier() and not keyword.iskeyword(name) else None
+
+
+def _exception_line(exc: Exception) -> str:
+    """The exception's type and the first line of its message, cut short."""
+    text = str(exc).partition("\n")[0]
+    text = text if len(text) <= 120 else text[:119] + "…"
+    return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
+
+
+def _in_function_bodies(tree: ast.Module) -> set[int]:
+    """The ids of the calls in *tree* that sit in a function or method body."""
+    ids: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            ids.update(
+                id(n) for stmt in node.body for n in ast.walk(stmt) if isinstance(n, ast.Call)
+            )
+    return ids
+
+
+def _reader_label(reader: CallReader) -> str:
+    return getattr(reader, "__qualname__", None) or repr(reader)
+
+
+def _insert_call_reads(
+    tree: ast.Module, readers: Sequence[CallReader]
+) -> tuple[list[ast.Call], list[str]]:
+    """Write each name a reader gives as a bare name read at its call, in *tree*.
+
+    ``df.query("a > @mu")`` becomes ``df.query("a > @mu", **(mu,))``: the existing
+    passes then read ``mu`` with every scope rule that applies there. Returns the calls
+    it changed, and what went wrong in the readers.
+    """
+    failures: list[str] = []
+    inserts: list[tuple[ast.Call, list[str]]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        found: dict[str, None] = {}
+        for reader in readers:
+            try:
+                got = reader(node)
+                if got is None:
+                    continue
+                if isinstance(got, (str, bytes)):
+                    raise TypeError(f"returned {type(got).__name__}, not an iterable of names")
+                given = list(got)
+            except Exception as exc:  # a host's reader must not take the analysis down
+                failures.append(f"{_reader_label(reader)} raised {_exception_line(exc)}")
+                continue
+            for given_name in given:
+                name = _identifier(given_name)
+                if name is not None:
+                    found[name] = None
+                else:
+                    failures.append(
+                        f"{_reader_label(reader)} returned {given_name!r:.80}, not a name"
+                    )
+        if found:
+            inserts.append((node, list(found)))
+    for call, names in inserts:
+        loads: list[ast.expr] = [ast.Name(id=name, ctx=ast.Load()) for name in names]
+        call.keywords.append(ast.keyword(arg=None, value=ast.Tuple(elts=loads, ctx=ast.Load())))
+    return [call for call, _ in inserts], list(dict.fromkeys(failures))
 
 
 # Walking the AST recurses once per level; a long ``a + a + ...`` chain is that deep.
@@ -768,6 +904,34 @@ def _body_refs(tables: list[symtable.SymbolTable], class_unbound: set[str]) -> s
     return refs
 
 
+def _free_only_by_insertion(
+    inserted: list[symtable.SymbolTable], original: list[symtable.SymbolTable]
+) -> set[str]:
+    """Names free in a scope only because a call reader's name was inserted there.
+
+    A reader's library looks the name up in the calling frame, then its globals. An
+    enclosing function's variable is in that frame only when the code captures it, so
+    one the code does not capture is read from the module.
+    """
+    found: set[str] = set()
+    stack = [
+        (a, b)
+        for ta, tb in zip(inserted, original)
+        for a, b in zip(ta.get_children(), tb.get_children())
+    ]
+    while stack:
+        a, b = stack.pop()
+        if a.get_name() != b.get_name() or a.get_type() != b.get_type():
+            continue  # the scopes no longer line up; read nothing more from here
+        known = set(b.get_identifiers())
+        for sym in a.get_symbols():
+            name = sym.get_name()
+            if sym.is_free() and not (name in known and b.lookup(name).is_free()):
+                found.add(name)
+        stack.extend(zip(a.get_children(), b.get_children()))
+    return found
+
+
 def _global_writes(
     tables: list[symtable.SymbolTable], tree: ast.Module
 ) -> tuple[set[str], set[str]]:
@@ -867,8 +1031,13 @@ UNPARSEABLE = (SyntaxError, ValueError, RecursionError, MemoryError)
 _BUILTIN_NAMES = frozenset(dir(builtins)) | {"__name__", "__file__", "__doc__", "__package__"}
 
 
-def analyze_cell(source: str) -> CellNames:
-    """Analyze a cell's source and extract its defines and references."""
+def analyze_cell(source: str, *, call_readers: Sequence[CallReader] = ()) -> CellNames:
+    """Analyze a cell's source and extract its defines and references.
+
+    A name a call reader gives is read at its call, after the call's arguments, as a
+    bare name written there would be; in a function body, unless that function binds
+    it, it is read from the module.
+    """
     if not source or not source.strip():
         return CellNames(defines=[], references=[])
 
@@ -882,10 +1051,35 @@ def analyze_cell(source: str) -> CellNames:
     except (RecursionError, MemoryError):
         return CellNames(too_deep=True)
 
+    # The readers' names go into a tree of their own: the global-write passes read
+    # the cell as written.
+    read_tree, read_source, reader_failures = tree, source, []
+    rewritten = False
+    if call_readers:
+        try:
+            read_tree = ast.parse(source)
+            inserted, reader_failures = _insert_call_reads(read_tree, call_readers)
+        except (RecursionError, MemoryError):
+            return CellNames(too_deep=True)
+        if not inserted:
+            read_tree = tree
+        else:
+            try:
+                read_source, rewritten = _deeply(lambda: ast.unparse(read_tree)), True
+            except (ValueError, RecursionError, MemoryError):
+                # An integer too long for ``str`` cannot be written back: the module
+                # level still reads the names, symtable reads the cell as written.
+                in_bodies = _in_function_bodies(read_tree)
+                if any(id(call) in in_bodies for call in inserted):
+                    reader_failures.append(
+                        "the cell could not be rewritten, so names its function bodies' "
+                        "calls read are missing"
+                    )
+
     # The visitor stops at function bodies; symtable covers those.
     def visited() -> VariableAnalyzer:
         analyzer = VariableAnalyzer()
-        analyzer.visit(tree)
+        analyzer.visit(read_tree)
         return analyzer
 
     try:
@@ -893,9 +1087,13 @@ def analyze_cell(source: str) -> CellNames:
     except RecursionError:
         return CellNames(too_deep=True)
 
-    found = _symbol_tables(source, tree)
+    found = _symbol_tables(read_source, read_tree)
     tables = found or []
     nested_refs = _body_refs(tables, analyzer.class_unbound)
+    if found is not None and rewritten:
+        original = _symbol_tables(source, tree)
+        if original is not None:
+            nested_refs |= _free_only_by_insertion(found, original)
 
     # ``global`` writes inside functions are module defines too.
     # ``global_read_writes`` are also read there, so they stay in references.
@@ -937,6 +1135,7 @@ def analyze_cell(source: str) -> CellNames:
         builtin_references=sorted(set(builtin_references)),
         error=None,
         bodies_unread=found is None,
+        reader_failures=reader_failures,
     )
 
 
@@ -948,6 +1147,12 @@ _MEMO_SIZE = 4096
 @functools.lru_cache(maxsize=_MEMO_SIZE)
 def _analyzed(source: str) -> CellNames:
     return analyze_cell(source)
+
+
+# Keyed by the readers too, so analyzers built afresh for each ``analyze`` still share it.
+@functools.lru_cache(maxsize=_MEMO_SIZE)
+def _analyzed_with(source: str, readers: tuple[CallReader, ...]) -> CellNames:
+    return analyze_cell(source, call_readers=readers)
 
 
 def normalize(source: str) -> str:
@@ -969,13 +1174,34 @@ def _normalized(source: str) -> str:
 
 
 class PythonAnalyzer:
-    """The Python language analyzer: ``analyze_cell`` over the cell body."""
+    """The Python language analyzer: ``analyze_cell`` over the cell body.
+
+    *call_readers* are the host's: each says which names a call reads that its code
+    does not show. A reader is called once per call in a cell, and its answer for a
+    source is memoized, so it must depend on the call alone.
+    """
 
     owns_key = True
 
+    def __init__(self, call_readers: Iterable[CallReader] = ()) -> None:
+        readers = tuple(call_readers)
+        for reader in readers:
+            if not callable(reader):
+                raise TypeError(f"a call reader must be callable, not {reader!r}")
+            try:
+                hash(reader)
+            except TypeError:
+                raise TypeError(f"a call reader must be hashable, not {reader!r}") from None
+        self._call_readers = readers
+
+    @property
+    def call_readers(self) -> tuple[CallReader, ...]:
+        return self._call_readers
+
     def analyze(self, cell: Cell) -> Analyzed:
         # Memoized: the lists are copied, so the caller may change its own.
-        result = _analyzed(cell.source)
+        readers = self._call_readers
+        result = _analyzed_with(cell.source, readers) if readers else _analyzed(cell.source)
         diagnostics = []
         if result.too_deep:
             diagnostics.append(
@@ -994,6 +1220,16 @@ class PythonAnalyzer:
                     Severity.WARN,
                     "the names this cell's functions and classes read could not be found, "
                     "so the cell may run before the cells that define them",
+                    cell.id,
+                )
+            )
+        if result.reader_failures:
+            diagnostics.append(
+                Diagnostic(
+                    "python_call_reader_failed",
+                    Severity.WARN,
+                    "a call reader failed, so names this cell's calls read may be missing: "
+                    + "; ".join(result.reader_failures),
                     cell.id,
                 )
             )
