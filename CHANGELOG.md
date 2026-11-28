@@ -10,6 +10,23 @@
   `python_call_reader_failed`. `string_literal` and `at_names` are for writing
   readers, such as one for pandas' `query` and `eval`.
 
+- A fan-out cell's imports reach a plain cell as the module, not a
+  `{variant: module}` dict (#27).
+  - `Analyzed` (as its last field, so positional construction is unchanged) and
+    `CellAnalysis` have `imports`: the defines whose value does not depend on the
+    cell's inputs. The Python analyzer gives the names bound only by an import at
+    the head of the cell, never assigned, mutated, deleted, caught as `except E as
+    name` or declared `global`.
+  - `variant_read` reads one of a fan-out cell's as a single value from any
+    instance, `VariantRead(every variant, scalar=True, fanout=True)`. Strata's
+    loader already binds a scalar read from the instance it finds; the execution
+    key covers every instance.
+  - A variant's contract (`variant_contract_mismatch`) leaves out the analyzer's
+    `imports`, where it parsed every member's source, of any language, as Python
+    for its top-level imports. An import the variant also assigns, or one after
+    another statement, is now in its contract, and a host with its own Python
+    analyzer gets the old leniency only by filling `imports`.
+
 ## 0.4.0 - 2026-11-06
 
 - docs/api.md says what the pre-release audit found missing or wrong (#23):

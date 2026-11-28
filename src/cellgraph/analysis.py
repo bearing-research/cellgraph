@@ -13,9 +13,7 @@ The wiring is Strata's ``NotebookDag.from_cells``, ported as is.
 
 from __future__ import annotations
 
-import ast
 import difflib
-import functools
 from collections import Counter, deque
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -48,7 +46,6 @@ from cellgraph.languages import (
     directive_keys,
     registered_analyzers,
 )
-from cellgraph.python import UNPARSEABLE
 from cellgraph.vocabulary import (
     CONVERSION_ERRORS,
     Annotation,
@@ -315,6 +312,8 @@ class CellAnalysis:
     references: list[str] = field(default_factory=list)
     builtin_references: list[str] = field(default_factory=list)
     mutation_defines: list[str] = field(default_factory=list)
+    # Defines the same whatever the cell's inputs (a module import), from the analyzer.
+    imports: list[str] = field(default_factory=list)
     bound: list[str] = field(default_factory=list)
     after: list[str] = field(default_factory=list)
     seeds: dict[str, str] = field(default_factory=dict)
@@ -418,25 +417,6 @@ def _naming_line(directives: list[Directive], key: str, token: str) -> int | Non
         if d.key == key and token in (t.rstrip(",") for t in d.value.split()):
             return d.line
     return _first_line(directives, key)
-
-
-@functools.lru_cache(maxsize=4096)
-def _top_level_imports(source: str) -> frozenset[str]:
-    """Each member is compared with each sibling, so its source is parsed once."""
-    try:
-        tree = ast.parse(source)
-    except UNPARSEABLE:
-        # A member another language's, or past what the parser takes, imports nothing.
-        return frozenset()
-    names: set[str] = set()
-    for node in tree.body:
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                names.add((alias.asname or alias.name).split(".")[0])
-        elif isinstance(node, ast.ImportFrom):
-            for alias in node.names:
-                names.add(alias.asname or alias.name)
-    return frozenset(names)
 
 
 def _parse_phase(
@@ -613,6 +593,13 @@ def _names_phase(ca: CellAnalysis, analyzed: Analyzed) -> None:
     ca.references = [name for name in references if name not in bound]
     ca.builtin_references = [name for name in analyzed.builtin_references if name not in bound]
     ca.mutation_defines = list(analyzed.mutation_defines)
+    # A name an effect also defines or binds may be another value than the import.
+    declared = {n for e in ca.effects if isinstance(e, Defines) for n in e.names}
+    ca.imports = [
+        name
+        for name in analyzed.imports
+        if name in defines and name not in bound and name not in declared
+    ]
     ca.bound = bound
 
     member_conflict = fanout_conflict = False
@@ -766,9 +753,9 @@ def _variant_notes(cells: list[CellAnalysis], dag: Dag, groups: GroupConfig) -> 
         group = cell.member.group
         origin, line = _member_origin(cell)
         siblings = [by_id[cid] for cid, _ in members[group].members if cid != cell.id]
-        own = set(cell.defines) - _top_level_imports(cell.source)
+        own = set(cell.defines) - set(cell.imports)
         for sibling in siblings:
-            theirs = set(sibling.defines) - _top_level_imports(sibling.source)
+            theirs = set(sibling.defines) - set(sibling.imports)
             if own != theirs:
                 cell.note(
                     "variant_contract_mismatch",

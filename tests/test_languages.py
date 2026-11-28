@@ -67,3 +67,10 @@ def test_a_bad_comment_marker_is_a_type_error(marker):
 
     with pytest.raises(TypeError, match="comment marker"):
         cg.comment_marker(Bad())
+
+
+def test_analyzed_keeps_its_positional_fields():
+    # ``imports`` came later, so it is last: a positional ``error`` stays an error.
+    analyzed = cg.Analyzed(["x"], [], [], [], "Syntax error: bad")
+    assert analyzed.error == "Syntax error: bad"
+    assert analyzed.imports == []

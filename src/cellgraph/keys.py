@@ -226,10 +226,12 @@ def definition_key(analysis: Analysis, cell: CellAnalysis) -> tuple[str, str]:
 class VariantRead:
     """What a cell reads of one variable a sweep makes: the variants, and how.
 
-    ``scalar``: a fan-out instance's own group, read as that variant's value; otherwise
-    the ``{variant: value}`` dict. ``fanout``: the variants are one fan-out cell's
-    instances rather than the members of a group. No variants: another variant's
-    member, which this cell does not read.
+    ``scalar``: one value, not the ``{variant: value}`` dict. With one variant it is a
+    fan-out instance's own group, read as that variant's value; with several, a fan-out
+    cell's import, the same in every instance, read as any one of them (the key covers
+    them all). ``fanout``: the variants are one fan-out cell's instances rather than
+    the members of a group. No variants: another variant's member, which this cell
+    does not read.
     """
 
     variants: tuple[str, ...]
@@ -243,10 +245,11 @@ def variant_read(
     """What *cell_id* (or its *instance*) reads of *var* from *upstream_id*, if a sweep makes it.
 
     A name the cell does not read is taken as its upstream makes it (a sweep member's,
-    or a fan-out cell's instances), not as whichever cell defines it last.
+    or a fan-out cell's instances), not as whichever cell defines it last. A fan-out
+    cell's import (in its ``imports``) is one value to every other cell.
     """
     producer = analysis.graph.read_producer(cell_id, var) or _role(analysis, upstream_id)
-    return _read_of(analysis, producer, cell_id, upstream_id, instance)
+    return _read_of(analysis, producer, cell_id, upstream_id, instance, var)
 
 
 def _role(analysis: Analysis, upstream_id: str) -> SweepProducer | None:
@@ -271,6 +274,7 @@ def _read_of(
     cell_id: str,
     upstream_id: str,
     instance: str | None,
+    var: str | None = None,
 ) -> VariantRead | None:
     from cellgraph.analysis import SweepProducer
 
@@ -282,10 +286,20 @@ def _read_of(
     if producer.fanout_cell is not None:
         if producer.fanout_cell != upstream_id:
             return None
-        names = (
-            (instance,) if own and instance is not None else tuple(n for n, _ in producer.variants)
-        )
-        return VariantRead(variants=names, scalar=own, fanout=True)
+        if own and instance is not None:
+            return VariantRead(variants=(instance,), scalar=True, fanout=True)
+        names = tuple(n for n, _ in producer.variants)
+        upstream = analysis.cells.get(upstream_id)
+        if (
+            var is not None
+            and upstream is not None
+            and var in upstream.imports
+            and producer.variants
+        ):
+            # Every instance imports the same module: one value, from whichever instance
+            # the host has. The key covers them all, since which one that is varies.
+            return VariantRead(variants=names, scalar=True, fanout=True)
+        return VariantRead(variants=names, scalar=False, fanout=True)
     member = next((name for name, cid in producer.variants if cid == upstream_id), None)
     if member is None:
         return None
@@ -395,7 +409,7 @@ def _upstream(
             if var == without:
                 continue
             producer = reads[var] if var in reads else role
-            read = _read_of(analysis, producer, cell_id, upstream_id, instance)
+            read = _read_of(analysis, producer, cell_id, upstream_id, instance, var)
             if read is not None and read.fanout:
                 parts: list[list[Any]] = []
                 for name in read.variants:
