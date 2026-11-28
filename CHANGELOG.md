@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+- The graph, from an audit:
+  - Every sweep member that reads its group's variable (`x = x + 1`, or `y = x`
+    in a member that does not make `x`) reads what the name was outside the
+    group: the latest producer before the member that is not the group. Only the
+    first member did; the others had no upstream at all, so they planned and keyed
+    without it, or read their siblings' values as a sweep.
+  - A reader between two sweep groups that make the same name reads the earlier
+    group, where the later group's producer replaced it everywhere: the reader
+    fanned out over the wrong group and a spurious `cycle` blocked it.
+  - A seed from a fan-out cell is read as its instances, so a seeded
+    `@per_variant` cell chains, where it was `per_variant_no_sweep_source`, and an
+    `@each` over it is `each_over_sweep`, as it is unseeded. A seed from a fan-out
+    cell later in the notebook is read as its instances too, but is no sweep
+    source for a `@per_variant` reader.
+  - `edges` holds one `DagEdge` per wired variable; a fan-out producer, or a name
+    an analyzer listed twice, gave several.
+  - An inactive variant member gets the problems that do not depend on the
+    selection, as an active one does: `each_on_variant_member`,
+    `per_variant_on_variant_member`, `after_self`, `after_unknown_cell`, and
+    `seed_unknown_cell` for a seed from no cell, itself, or a cell that does not
+    make the name.
+  - An `@after` problem from an `also_reads` key is on the line that names the id;
+    its line was None. `CellAnalysis.annotation_keys` holds each present
+    annotation's directive keys.
+
 - Execution keys, from an audit:
   - A `.` in a cell id or group name is escaped in key addresses (`%2E`, and `%`
     as `%25`), so a cell `a` making `x.y` and a cell `a.x` making `y` no longer

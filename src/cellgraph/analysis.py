@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import difflib
 from collections import Counter, deque
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -283,7 +283,9 @@ def _cycle_through(dag: Dag, component: list[str], start: str) -> list[str]:
 
 
 def _wire(dag: Dag, from_id: str, to_id: str, var: str) -> None:
-    dag.edges.append(DagEdge(from_cell_id=from_id, to_cell_id=to_id, variable=var))
+    wired = dag.wired_inputs.setdefault(to_id, {}).setdefault(from_id, set())
+    if var not in wired:  # one edge per variable, however often it is wired
+        dag.edges.append(DagEdge(from_cell_id=from_id, to_cell_id=to_id, variable=var))
     if from_id not in dag.cell_upstream[to_id]:
         dag.cell_upstream[to_id].append(from_id)
     if to_id not in dag.cell_downstream[from_id]:
@@ -337,6 +339,9 @@ class CellAnalysis:
     # Set by ``analyze`` for every cell, plannable or not.
     definition_key: str | None = None
     normalized: str | None = None
+    # Each present annotation's directive keys, its ``also_reads`` included: where a
+    # problem an effect makes is found in the source.
+    annotation_keys: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
     def error(
         self,
@@ -407,16 +412,12 @@ def _member_origin(cell: CellAnalysis) -> tuple[str | None, int | None]:
     return None, None
 
 
-def _first_line(directives: list[Directive], key: str) -> int | None:
-    return next((d.line for d in directives if d.key == key), None)
-
-
-def _naming_line(directives: list[Directive], key: str, token: str) -> int | None:
-    """The first *key* line with *token* among its values; else the first *key* line."""
+def _naming_line(directives: list[Directive], keys: tuple[str, ...], token: str) -> int | None:
+    """The first line of *keys* with *token* among its values; else the first one of them."""
     for d in directives:
-        if d.key == key and token in (t.rstrip(",") for t in d.value.split()):
+        if d.key in keys and token in (t.rstrip(",") for t in d.value.split()):
             return d.line
-    return _first_line(directives, key)
+    return next((d.line for d in directives if d.key in keys), None)
 
 
 def _parse_phase(
@@ -472,6 +473,7 @@ def _parse_phase(
                 )
             value = value.value
         ca.annotations[annotation.key] = value
+        ca.annotation_keys[annotation.key] = annotation.keys
         if annotation.in_key and partial:
             # The lines it could not read are in neither the value nor the body, so the
             # field cannot tell this cell from one without them.
@@ -820,7 +822,8 @@ def _wiring_phase(cells: list[CellAnalysis], groups: GroupConfig) -> Dag:
     inactive = dag.inactive_cells
 
     cell_by_id = {c.id: c for c in cells}
-    sweep_producer_for_var: dict[str, SweepProducer] = {}
+    # By group and variable: two groups may each make the same name.
+    sweep_producer_for_var: dict[tuple[str, str], SweepProducer] = {}
     sweep_member_group: dict[str, str] = {}
     for res in dag.variant_groups:
         if res.mode != "sweep":
@@ -832,7 +835,7 @@ def _wiring_phase(cells: list[CellAnalysis], groups: GroupConfig) -> Dag:
             for var in cell_by_id[cid].defines:
                 var_members.setdefault(var, []).append((name, cid))
         for var, members in var_members.items():
-            sweep_producer_for_var[var] = SweepProducer(
+            sweep_producer_for_var[(res.group, var)] = SweepProducer(
                 group=res.group, variants=tuple(sorted(members))
             )
 
@@ -850,21 +853,35 @@ def _wiring_phase(cells: list[CellAnalysis], groups: GroupConfig) -> Dag:
     # Wire each reference to the producer before this cell, then register this cell's
     # defines: a mutating cell reads the prior value and produces the new one.
     active_ids = set(cell_ids) - inactive
+    # What each sweep group's variable was outside the group: the producer the group's
+    # last registration replaced (a cell between two members may have changed it).
+    before_group: dict[tuple[str, str], str | SweepProducer | None] = {}
+    seeded: list[tuple[CellAnalysis, str, str]] = []
     for cell in cells:
         # An inactive member is not wired: what it would read depends on the selection,
         # so a host selects it and analyzes again (``InactiveVariantError``).
         if cell.id in inactive:
+            # Not wired, but what does not depend on the selection is still reported.
+            _member_fanout_notes(cell)
+            for upstream_id in cell.after:
+                _after_problem(cell, upstream_id, cell_by_id)
+            for name, seed_id in cell.seeds.items():
+                _seed_problem(cell, name, seed_id, cell_by_id, inactive=frozenset())
             continue
         for var in (*cell.references, *cell.builtin_references):
             if var in cell.seeds:
                 continue
             producer = dag.variable_producer.get(var)
+            if (
+                isinstance(producer, SweepProducer)
+                and producer.fanout_cell is None
+                and sweep_member_group.get(cell.id) == producer.group
+            ):
+                # A member reading its own group's variable does not read its
+                # siblings: it reads what the name was outside the group.
+                producer = before_group.get((producer.group, var))
             if producer is None or producer == cell.id:
                 continue
-            if isinstance(producer, SweepProducer):
-                if cell.id in {cid for _, cid in producer.variants}:
-                    # A member refining its own group's variable does not read its siblings.
-                    continue
             dag.read_producers.setdefault(cell.id, {})[var] = producer
             if isinstance(producer, SweepProducer):
                 for _name, member_id in producer.variants:
@@ -873,56 +890,23 @@ def _wiring_phase(cells: list[CellAnalysis], groups: GroupConfig) -> Dag:
                 _wire(dag, producer, cell.id, var)
 
         for name, seed_id in cell.seeds.items():
-            seed = cell_by_id.get(seed_id)
-            origin, origin_line = cell.seed_origins.get(name, (None, None))
-            if seed is None:
-                reason, message = "unknown", f"`{name}` is seeded from {seed_id!r}, no cell"
-            elif seed_id == cell.id:
-                reason, message = "self", f"`{name}` is seeded from the cell itself"
-            elif seed_id in inactive:
-                reason, message = (
-                    "inactive",
-                    f"`{name}` is seeded from {seed_id}, an inactive variant",
-                )
-            elif name not in seed.defines:
-                reason = "undefined"
-                message = f"`{name}` is seeded from {seed_id}, which does not define it"
-            else:
-                dag.read_producers.setdefault(cell.id, {})[name] = seed_id
-                _wire(dag, seed_id, cell.id, name)
+            if _seed_problem(cell, name, seed_id, cell_by_id, inactive):
                 continue
-            cell.error(
-                "seed_unknown_cell",
-                message,
-                annotation=origin,
-                line=origin_line,
-                args={"name": name, "cell_id": seed_id, "reason": reason},
-            )
+            # A fan-out cell is read as its instances, seeded or not; one later in the
+            # notebook is not known yet, and is resolved after every cell is wired.
+            fanned = dag.fanout_cells.get(seed_id)
+            dag.read_producers.setdefault(cell.id, {})[name] = fanned or seed_id
+            if fanned is None:
+                seeded.append((cell, name, seed_id))
+            _wire(dag, seed_id, cell.id, name)
 
         dag.consumed_variables[cell.id].update(v for v in cell.kept if v in cell.defines)
 
         for upstream_id in cell.after:
+            if _after_problem(cell, upstream_id, cell_by_id):
+                continue
             origin = cell.after_origins.get(upstream_id)
-            line = _naming_line(cell.directives, origin, upstream_id) if origin else None
-            if upstream_id == cell.id:
-                cell.note(
-                    "after_self",
-                    Severity.WARN,
-                    "`@after` names this cell",
-                    annotation=origin,
-                    line=line,
-                    args={"cell_id": upstream_id},
-                )
-                continue
-            if upstream_id not in cell_by_id:
-                cell.error(
-                    "after_unknown_cell",
-                    f"`@after {upstream_id}` names no cell",
-                    annotation=origin,
-                    line=line,
-                    args={"cell_id": upstream_id},
-                )
-                continue
+            line = _after_line(cell, upstream_id)
             if upstream_id not in active_ids:
                 cell.error(
                     "after_inactive_variant",
@@ -961,19 +945,44 @@ def _wiring_phase(cells: list[CellAnalysis], groups: GroupConfig) -> Dag:
                 fanout_cell=cell.id,
             )
         for var in cell.defines:
-            if is_sweep_member and var in sweep_producer_for_var:
-                new_producer: str | SweepProducer = sweep_producer_for_var[var]
+            own_sweep = sweep_producer_for_var.get((sweep_member_group.get(cell.id, ""), var))
+            if is_sweep_member and own_sweep is not None:
+                new_producer: str | SweepProducer = own_sweep
             elif cell.id in dag.fanout_cells:
                 new_producer = dag.fanout_cells[cell.id]
             else:
                 new_producer = cell.id
             previous = dag.variable_producer.get(var)
+            if (
+                isinstance(new_producer, SweepProducer)
+                and new_producer.fanout_cell is None
+                and previous != new_producer
+            ):
+                before_group[(new_producer.group, var)] = previous
             if previous is not None and previous != new_producer:
                 short = (previous.group if isinstance(previous, SweepProducer) else previous)[:8]
                 dag.shadow_warnings.setdefault(cell.id, []).append(
                     f"Variable '{var}' shadows definition from cell {short}"
                 )
             dag.variable_producer[var] = new_producer
+
+    # A seed from a fan-out cell later in the notebook. It is read as its instances,
+    # but is no sweep source for a ``@per_variant`` reader, which fanned out (or did
+    # not) before the later cell was wired.
+    for cell, name, seed_id in seeded:
+        fanned = dag.fanout_cells.get(seed_id)
+        if fanned is None:
+            continue
+        dag.read_producers[cell.id][name] = fanned
+        if cell.fanout is not None and cell.fanout.over == name and name not in cell.bound:
+            origin, line = cell.fanout_origin
+            cell.error(
+                "each_over_sweep",
+                f"`{name}` comes from a sweep, which has no one collection to iterate",
+                annotation=origin,
+                line=line,
+                args={"source": name},
+            )
 
     active_cell_ids = [cid for cid in cell_ids if cid not in inactive]
     for cell_id in active_cell_ids:
@@ -993,6 +1002,93 @@ def _wiring_phase(cells: list[CellAnalysis], groups: GroupConfig) -> Dag:
             cell_by_id[cid].error("cycle", message, args={"cycle": cycle})
     dag.topological_order = _kahn(dag, active_cell_ids)
     return dag
+
+
+def _after_line(cell: CellAnalysis, upstream_id: str) -> int | None:
+    origin = cell.after_origins.get(upstream_id)
+    if origin is None:
+        return None
+    return _naming_line(cell.directives, cell.annotation_keys.get(origin, (origin,)), upstream_id)
+
+
+def _after_problem(
+    cell: CellAnalysis, upstream_id: str, cell_by_id: Mapping[str, CellAnalysis]
+) -> bool:
+    """Whether ``@after`` *upstream_id* names the cell itself or no cell, reported."""
+    origin = cell.after_origins.get(upstream_id)
+    if upstream_id == cell.id:
+        cell.note(
+            "after_self",
+            Severity.WARN,
+            "`@after` names this cell",
+            annotation=origin,
+            line=_after_line(cell, upstream_id),
+            args={"cell_id": upstream_id},
+        )
+        return True
+    if upstream_id not in cell_by_id:
+        cell.error(
+            "after_unknown_cell",
+            f"`@after {upstream_id}` names no cell",
+            annotation=origin,
+            line=_after_line(cell, upstream_id),
+            args={"cell_id": upstream_id},
+        )
+        return True
+    return False
+
+
+def _seed_problem(
+    cell: CellAnalysis,
+    name: str,
+    seed_id: str,
+    cell_by_id: Mapping[str, CellAnalysis],
+    inactive: Collection[str],
+) -> bool:
+    """Whether the seed of *name* cannot be read from *seed_id*, reported."""
+    seed = cell_by_id.get(seed_id)
+    if seed is None:
+        reason, message = "unknown", f"`{name}` is seeded from {seed_id!r}, no cell"
+    elif seed_id == cell.id:
+        reason, message = "self", f"`{name}` is seeded from the cell itself"
+    elif seed_id in inactive:
+        reason, message = "inactive", f"`{name}` is seeded from {seed_id}, an inactive variant"
+    elif name not in seed.defines:
+        reason = "undefined"
+        message = f"`{name}` is seeded from {seed_id}, which does not define it"
+    else:
+        return False
+    origin, origin_line = cell.seed_origins.get(name, (None, None))
+    cell.error(
+        "seed_unknown_cell",
+        message,
+        annotation=origin,
+        line=origin_line,
+        args={"name": name, "cell_id": seed_id, "reason": reason},
+    )
+    return True
+
+
+def _member_fanout_notes(cell: CellAnalysis) -> None:
+    """An inactive member's own fan-out problem, which its wiring would report."""
+    if cell.fanout is None or cell.member is None:
+        return
+    origin, line = cell.fanout_origin
+    if cell.fanout.over is not None:
+        cell.error(
+            "each_on_variant_member",
+            "a variant member cannot also run once per item",
+            annotation=origin,
+            line=line,
+        )
+    else:
+        cell.note(
+            "per_variant_on_variant_member",
+            Severity.WARN,
+            "a variant member cannot also fan out over a group",
+            annotation=origin,
+            line=line,
+        )
 
 
 def _each_notes(cell: CellAnalysis, dag: Dag) -> None:
