@@ -222,7 +222,8 @@ def test_a_partial_value_keeps_its_effects_and_reports_its_errors():
     cell = analysis.cells["a"]
     assert cell.annotations["src"] == ["data"]
     assert cell.bound == ["data"] and cell.references == []
-    assert cell.key_fields == {"src": ["data"]}
+    # The line it could not read is in neither the value nor the body: no key field.
+    assert cell.key_fields == {} and cell.unkeyed == ["src"]
     assert [(d.code, d.line) for d in cell.diagnostics] == [("src_unreadable", 2)]
     assert not cell.plannable
 

@@ -44,16 +44,27 @@ There a `#` line is body: it ends the block, and `# @key` is not a directive.
 | `parse_directive(line)` | `(key, value)` or None |
 | `strip(source)` | the source without its leading block |
 | `strip_directives(source, keys=None)` | the source without its directive lines (only `keys`' when given); other comments stay |
-| `set_directive(source, key, value)` | replace the first `# @key`, drop repeats, or insert one after the last directive (at the top when there is none); line endings are kept |
+| `block(source)` | `(line number, raw line)` for each non-blank line of the leading block |
+| `set_directive(source, key, value)` | replace the first `# @key`, drop repeats, or insert one after the last directive (at the top when there is none) |
 | `remove_directive(source, key)` | every `# @key` in the block removed |
+
+An edit keeps every other line, and each line's own ending; an inserted line takes
+its neighbour's, and an edit that changes nothing returns the source as it was. A
+`key` the grammar would not read back as itself (`reads_key(key)`; under the
+default pattern, one word of letters, digits and `_`) or a `value` with a line
+break inside it is a `ValueError` for `set_directive`, and a non-str one a
+`TypeError`: either would write another line than one directive. The value is
+stripped, so a break at its edge goes. `remove_directive` of a key no directive has
+returns the source. A leading byte-order mark is kept
+where it is and does not hide the first line's directive.
 
 A vocabulary edits a cell through the grammar of its language:
 
 | Method | Does |
 | ------ | ---- |
 | `vocab.grammar_for(analyzer)` | `vocab.grammar.with_marker(comment_marker(analyzer))`; what `analyze` and the definition key use |
-| `vocab.set_directive(source, key, value, *, language="python")` | `set_directive` in `language`'s marker; refuses a stacked annotation's key |
-| `vocab.remove_directive(source, key, *, language="python")` | `remove_directive` in `language`'s marker |
+| `vocab.set_directive(source, key, value, *, language="python")` | `set_directive` in `language`'s marker; refuses a stacked annotation's key, and a key the language does not read (see `directives` below) |
+| `vocab.remove_directive(source, key, *, language="python")` | `remove_directive` in `language`'s marker; a key the language does not read is body text, and stays |
 
 `language` is a registered language's name, or the analyzer itself. A host that
 passes its own `analyzers=` table to `analyze` passes the same analyzer here, so
@@ -62,7 +73,8 @@ the edit and the parse use one marker.
 ## Effects
 
 An annotation acts on the graph only through these ten effects. Names may be given
-as a string or an iterable.
+as a string or an iterable of strings; bytes, or a name that is not a str, is a
+`TypeError`.
 
 | Effect | Meaning |
 | ------ | ------- |
@@ -95,7 +107,12 @@ Annotation(
   `AnnotationError`s, and each becomes a diagnostic; any other exception in the
   group propagates. A parser that can read some lines and not others returns
   `Partial(value, errors)`: the annotation is present with `value`, and each error
-  is a diagnostic.
+  (an `AnnotationError`; anything else is a `TypeError`) is a diagnostic. An
+  `in_key` annotation with errors is `unkeyed`: its value cannot tell this cell
+  from one without the lines it could not read.
+- `key` and each of `also_reads` (a sequence of str) is non-empty, lower-case and
+  without whitespace, as a grammar reads directive keys; another is a
+  `ValueError`. What else a key may hold is the grammar's to say.
 - `effects(value)` returns effects. It runs only when the annotation is present.
 - `in_key`: a present annotation adds the field `key` to the definition key, with
   the value `encode(value)`, or `value` itself when that is canonical (None, bool,
@@ -103,7 +120,7 @@ Annotation(
   not canonical is the error `<key>_unencodable`, and so is an `AnnotationError`,
   `ValueError`, `TypeError` or `LookupError` from `encode`.
 - `validate(value, ValidationContext(cell, defines, references, host))` returns
-  diagnostics. It runs after names are known; an `AnnotationError` it raises (or
+  diagnostics, or None for none. It runs after names are known; an `AnnotationError` it raises (or
   a group of them) becomes `<key>_invalid`, on the annotation's first line unless
   the error names one.
 
@@ -113,13 +130,17 @@ vocabulary's `cell_effects`.
 Parsers: `scalar(convert=str)` (the last line wins; empty is an error, and so is a
 `ValueError`, `TypeError` or `LookupError` from `convert`, while anything else it
 raises is a bug and propagates), `flag()` (bare, or `on|off|true|false|yes|no|1|0`),
-and `stacked(item)` (one value per line). `mark_stacked(parse)` marks a hand-written
+and `stacked(item)` (one value per line; a line `item` cannot read, as `scalar`
+judges, is an error on that line, and the others are kept as a `Partial`).
+`mark_stacked(parse)` marks a hand-written
 parser as reading repeated lines, and `is_stacked(parse)` tells.
 
 ```python
 Vocabulary(annotations, cell_effects=None, grammar=GRAMMAR)
 ```
 
+- A directive key the grammar does not read back (`grammar.reads_key(key)`) is
+  refused with a `ValueError`: `@my-tag` would read as `@my`.
 - A directive key claimed twice is refused, and so is a key in both sides of
   `a | b`, so composition order never decides a result. `|` chains the two
   `cell_effects` hooks, and keeps a custom `grammar` from either side; two that
@@ -133,10 +154,13 @@ Vocabulary(annotations, cell_effects=None, grammar=GRAMMAR)
   `variant <group> <name>`, `per_variant [group]` and
   `each <name> in <source> [key=<column>] [glob=<pattern>]`. Of these,
   `per_variant` and `each` are in the key.
-- `vocab[key]`, `key in vocab`, `vocab.keys` (also-read keys included),
-  `vocab.owner(directive_key)`, `vocab.without(*keys)` and
-  `vocab.replace(key, **changes)`. `without` and `replace` raise `KeyError` for a
-  key the vocabulary does not have.
+- `vocab[key]`, `key in vocab` (an annotation's own key), `vocab.keys` (also-read
+  keys included), `vocab.owner(directive_key)`, `vocab.without(*keys)` and
+  `vocab.replace(key, /, **changes)`, which can change the key too. `without` and
+  `replace` raise `KeyError` for a key the vocabulary does not have.
+- A vocabulary holds `Annotation`s, and its `grammar` is a `Grammar`; another is a
+  `TypeError`, and so is `vocab | x` for an `x` that is not a vocabulary. Two
+  vocabularies are equal when their annotations, hook and grammar are.
 - `vocab.set_directive(source, key, value, *, language="python")` refuses a
   stacked annotation's key, which a single-line edit would truncate. `language`
   picks the comment marker (see Cells and the grammar).
@@ -241,9 +265,10 @@ still gets names, edges, plannability and plan steps, and `execution_key` return
     rest of the cell's analysis stands.
   - Answers are memoized by source and readers, shared by every analyzer with the
     same readers, so a reader must depend on the call alone and be hashable. A
-    name is read as Python reads an identifier, NFKC-normalized (`ﬁ` is `fi`). `analyze_cell(source, call_readers=...)` takes readers too, and
-    without them reads none. The key does not record which readers ran: a host
-    that changes its readers versions its own keys.
+    name is read as Python reads an identifier, NFKC-normalized (`ﬁ` is `fi`).
+    `analyze_cell(source, call_readers=...)` takes readers too, and without them
+    reads none. The key does not record which readers ran: a host that changes its readers
+    versions its own keys.
 - `string_literal(node)` is the text of a plain string literal (implicitly
   concatenated literals included), None for an f-string or anything else.
   `at_names(text)` is the identifiers after `@` in *text*, in order and once each,

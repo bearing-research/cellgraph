@@ -461,6 +461,7 @@ def _parse_phase(
             if annotation.in_key:
                 ca.unkeyed.append(annotation.key)
             continue
+        partial = isinstance(value, Partial) and bool(value.errors)
         if isinstance(value, Partial):
             for exc in value.errors:
                 ca.error(
@@ -471,7 +472,11 @@ def _parse_phase(
                 )
             value = value.value
         ca.annotations[annotation.key] = value
-        if annotation.in_key:
+        if annotation.in_key and partial:
+            # The lines it could not read are in neither the value nor the body, so the
+            # field cannot tell this cell from one without them.
+            ca.unkeyed.append(annotation.key)
+        elif annotation.in_key:
             _encode(ca, annotation, value, directives[0].line)
         if annotation.effects is not None:
             produced = list(annotation.effects(value))
@@ -1216,7 +1221,8 @@ def analyze(
             )
             try:
                 found = annotation.validate(ca.annotations[annotation.key], context_view)
-                ca.diagnostics.extend(replace(d, cell=ca.id) for d in found)
+                # None, as a validator that only raises returns, is no diagnostics.
+                ca.diagnostics.extend(replace(d, cell=ca.id) for d in found or ())
             except (AnnotationError, ExceptionGroup) as raised:
                 first = next((d.line for d in ca.directives if d.key in annotation.keys), None)
                 for exc in _annotation_errors(raised):

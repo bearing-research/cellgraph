@@ -12,7 +12,16 @@ from typing import Any
 
 
 def _names(names: Any) -> tuple[str, ...]:
-    return (names,) if isinstance(names, str) else tuple(names)
+    """A str or an iterable of str, as a tuple; bytes or a non-str name is a ``TypeError``."""
+    if isinstance(names, str):
+        return (names,)
+    if isinstance(names, (bytes, bytearray)):
+        raise TypeError(f"names must be str, not {names!r}")
+    found = tuple(names)
+    for name in found:
+        if not isinstance(name, str):
+            raise TypeError(f"names must be str, not {name!r}")
+    return found
 
 
 @dataclass(frozen=True, init=False)

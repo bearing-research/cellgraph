@@ -3,6 +3,7 @@ import re
 import pytest
 
 from cellgraph.grammar import GRAMMAR, Directive, Grammar, source_lines
+from cellgraph.vocabulary import Annotation
 
 
 def test_the_block_ends_at_the_first_body_line():
@@ -176,3 +177,120 @@ def test_a_splice_leaves_a_line_holding_another_break_whole():
     source = "# @a 1\x0cx = 1\n"
     assert GRAMMAR.set_directive(source, "a", "2") == "# @a 2\n# @a 1\x0cx = 1\n"
     assert GRAMMAR.remove_directive(source, "a") == source
+
+
+# --- found by the audit -------------------------------------------------------------
+
+
+def test_a_long_run_of_whitespace_parses_in_linear_time():
+    import time
+
+    start = time.perf_counter()
+    assert GRAMMAR.parse_directive("# @a x" + " \t" * 20000 + "y") == (
+        "a",
+        "x" + " \t" * 20000 + "y",
+    )
+    assert time.perf_counter() - start < 0.5
+
+
+@pytest.mark.parametrize("value", ["a\nimport os", "a\rb", "a b"])
+def test_a_value_with_a_line_break_is_refused(value):
+    with pytest.raises(ValueError, match="one line"):
+        GRAMMAR.set_directive("x = 1\n", "name", value)
+
+
+@pytest.mark.parametrize("key", ["per-variant", "", "a b", "İD", "name:"])
+def test_a_key_the_grammar_would_not_read_back_is_refused(key):
+    with pytest.raises(ValueError, match="reads back"):
+        GRAMMAR.set_directive("x = 1\n", key, "v")
+    # No directive has it, so removing it changes nothing.
+    assert GRAMMAR.remove_directive("# @per x\nx = 1\n", key) == "# @per x\nx = 1\n"
+
+
+class Quarto(Grammar):
+    """``#| key: value``, whose keys may hold a hyphen."""
+
+    directive_re = re.compile(r"^#\|\s*([\w-]+):\s*(.*)$")
+
+    def _in_block(self, stripped):
+        return stripped.startswith("#|")
+
+    def _format(self, key, value):
+        return f"#| {key}: {value.strip()}"
+
+
+def test_a_grammar_says_what_a_key_may_hold():
+    quarto = Quarto()
+    assert quarto.set_directive("x = 1\n", "fig-cap", "A plot") == "#| fig-cap: A plot\nx = 1\n"
+    assert quarto.remove_directive("#| fig-cap: A\nx = 1\n", "fig-cap") == "x = 1\n"
+    assert Annotation("fig-cap").key == "fig-cap"
+
+
+def test_an_outer_line_break_in_a_value_is_stripped():
+    assert GRAMMAR.set_directive("x\n", "a", "v\n") == "# @a v\nx\n"
+    assert GRAMMAR.set_directive("x\n", "a", "\x0cv ") == "# @a v\nx\n"
+    with pytest.raises(ValueError, match="one line"):
+        GRAMMAR.set_directive("x\n", "a", "v\nw")
+
+
+def test_a_non_str_key_or_value_is_a_type_error():
+    with pytest.raises(TypeError):
+        GRAMMAR.set_directive("x\n", 1, "v")  # ty: ignore[invalid-argument-type]
+    with pytest.raises(TypeError):
+        GRAMMAR.set_directive("x\n", "name", 1)  # ty: ignore[invalid-argument-type]
+
+
+@pytest.mark.parametrize(
+    ("source", "key", "value", "expected"),
+    [
+        ("# @a 1\nx = 1\ny = 2\r\n", "b", "2", "# @a 1\n# @b 2\nx = 1\ny = 2\r\n"),
+        ("# @a 1\r\nx = 1\ny = 2\r", "a", "3", "# @a 3\r\nx = 1\ny = 2\r"),
+        ("x = 1\r\ny = 2\n", "a", "1", "# @a 1\r\nx = 1\r\ny = 2\n"),
+        ("# @a 1", "b", "2", "# @a 1\n# @b 2"),
+        ("# @a 1\r\n# @a 2\nx\n", "a", "3", "# @a 3\r\nx\n"),
+    ],
+)
+def test_an_edit_keeps_each_lines_ending(source, key, value, expected):
+    assert GRAMMAR.set_directive(source, key, value) == expected
+
+
+def test_an_edit_that_changes_nothing_returns_the_source():
+    for source in ("x = 1\ny = 2\r\n", "# @a 1\r\nx\r\n"):
+        assert GRAMMAR.remove_directive(source, "zzz") is source
+    for source in ("# @a 1\ny = 2\r\n", "# @a 1\r\nx\r\n"):
+        assert GRAMMAR.set_directive(source, "a", "1") is source
+    assert GRAMMAR.remove_directive("# @a\n# @b", "b") == "# @a"
+
+
+def test_toggling_a_cells_only_directive_round_trips():
+    source = "# @nocache\n"
+    removed = GRAMMAR.remove_directive(source, "nocache")
+    assert removed == ""
+    assert GRAMMAR.set_directive(removed, "nocache", "") == "# @nocache"
+    assert GRAMMAR.remove_directive(GRAMMAR.set_directive(removed, "nocache", ""), "nocache") == ""
+
+
+def test_a_byte_order_mark_hides_no_directive_and_stays_first():
+    source = "﻿# @name n\nx = 1\n"
+    assert GRAMMAR.directives(source) == [Directive("name", "n", 1)]
+    assert GRAMMAR.strip_directives(source) == "x = 1"
+    assert GRAMMAR.set_directive(source, "nocache", "") == "﻿# @name n\n# @nocache\nx = 1\n"
+    assert GRAMMAR.set_directive("﻿x = 1\n", "a", "1") == "﻿# @a 1\nx = 1\n"
+    assert GRAMMAR.remove_directive(source, "name") == "﻿x = 1\n"
+
+
+class Bare(Quarto):
+    def _format(self, key, value):
+        return f"#| {key}: {value}"
+
+
+class Unquoting(Grammar):
+    def parse_directive(self, line):
+        parsed = super().parse_directive(line)
+        return parsed and (parsed[0], parsed[1].strip('"'))
+
+
+def test_a_grammar_writes_the_stripped_value_and_may_read_it_its_way():
+    assert Bare().set_directive("x = 1\n", "fig-cap", "\nv") == "#| fig-cap: v\nx = 1\n"
+    assert Unquoting().set_directive("x\n", "cap", '"A plot"') == '# @cap "A plot"\nx\n'
+    assert GRAMMAR.reads_key("a_1") and not GRAMMAR.reads_key("per-variant")
