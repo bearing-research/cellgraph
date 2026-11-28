@@ -175,8 +175,21 @@ its other `-- @` lines are plain text, kept in the body as above.
 without `@` or whitespace is a `TypeError`.
 
 `Analyzed(defines, references, builtin_references, mutation_defines, error,
-diagnostics)`.
+diagnostics, imports)`.
 
+- `imports` is the defines whose value does not depend on the cell's inputs, as a
+  module import's does not. Every instance of a fan-out cell makes the same one, so
+  a cell that is not an instance of its group reads it as one instance's value
+  (see `variant_read`), and a variant's imports are left out of its contract
+  (`variant_contract_mismatch`). A name an effect also defines or binds is not
+  one. The Python analyzer gives the names bound only by an import at the head of
+  the cell, before any other statement but a docstring, since one before it may
+  change what an import finds (`sys.path.insert`): not one under `if` or `try`,
+  nor one the cell also assigns, mutates, deletes (anywhere), names in an
+  `except E as name` or declares `global` in a function. That the module is then
+  the same in every instance is an assumption: an upstream cell's `sys.path` is
+  the same for each, and a call that changes the module (`importlib.reload`) is
+  not seen.
 - `error` is a body that cannot be read, and becomes the error `syntax_error`.
 - `diagnostics` is anything else the analyzer finds, such as a host's
   per-language checks that run with or without a directive. They are the cell's
@@ -313,8 +326,11 @@ it, so check `dag.inactive_cells` first.
   a name the cell does not read, when `upstream_id` is in a sweep), as
   `VariantRead(variants, scalar, fanout)`, or None. `scalar` is an instance's own
   group, read as its variant's value; otherwise the `{variant: value}` dict.
-  `fanout` says the variants are one fan-out cell's instances. No variants is
-  another variant's member, which the cell does not read. The execution key reads
+  `fanout` says the variants are one fan-out cell's instances. A fan-out cell's
+  import (in its `imports`) is one value to any cell that is not its instance:
+  `VariantRead(every variant, scalar=True, fanout=True)`, to load from whichever
+  instance the host has, and the key covers each. No variants is another variant's
+  member, which the cell does not read. The execution key reads
   by this rule, so a host that loads inputs by it loads what the key covers.
 - `shadowed_reads(cell_id)`: the names the cell reads that an upstream defines but
   is not wired to give it; each is read from its wired producer only.

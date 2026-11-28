@@ -513,6 +513,72 @@ def test_two_sweeps_making_one_name_stay_apart(run):
     )
 
 
+# A fan-out cell that imports a module as well as computing from the sweep.
+IMPORTING = "# @per_variant\nimport math\nscore = math.prod([m, 2])"
+
+
+def test_a_plain_reader_reads_a_fan_out_import_as_one_instance(run):
+    # Every instance imports the same module: it is read as itself, not {variant: module}.
+    analysis = run(*MEMBERS, IMPORTING, "print(type(math), score)", groups=SWEEP)
+    assert analysis.cells["c2"].imports == ["math"]
+    # One value, from whichever instance the host has.
+    assert analysis.variant_read("c3", "c2", "math") == cg.VariantRead(("big", "small"), True, True)
+    assert analysis.variant_read("c3", "c2", "score") == cg.VariantRead(
+        ("big", "small"), False, True
+    )
+    # An instance of the same group still reads its own.
+    own = run(*MEMBERS, IMPORTING, "# @per_variant\nprint(math, score)", groups=SWEEP)
+    assert own.variant_read("c3", "c2", "math", "small") == cg.VariantRead(("small",), True, True)
+
+    def key(math_small="ms", score_small="ss"):
+        snapshot = cg.Published(
+            outputs={
+                "math": cg.OutputRef(cg.Provenance("mb")),
+                "score": cg.OutputRef(cg.Provenance("sb")),
+            },
+            instances={
+                ("math", "big"): cg.OutputRef(cg.Provenance("mb")),
+                ("math", "small"): cg.OutputRef(cg.Provenance(math_small)),
+                ("score", "big"): cg.OutputRef(cg.Provenance("sb")),
+                ("score", "small"): cg.OutputRef(cg.Provenance(score_small)),
+            },
+        )
+        return analysis.execution_key("c3", published=published(c2=snapshot), env_hash=ENV)
+
+    base = key()
+    assert [
+        "instances:c2.math",
+        cg.canonical_json(
+            ["variant", "math", [["big", ["provenance", "mb"]], ["small", ["provenance", "ms"]]]]
+        ),
+    ] in base.parts["upstream"]
+    # Which instance the host loads varies, so the key covers each; a missing one is left out.
+    assert key(math_small="other").digest != base.digest
+    assert key(score_small="other").digest != base.digest
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "if m > 1:\n    import math\nelse:\n    import cmath as math",
+        "try:\n    import math\nexcept ImportError:\n    math = None\nx = m",
+        "import math\nmath = math.pi * m",
+        "import math\nmath.tau = m",
+        "# @out math\nimport math\nx = m",
+        "import math\nif m > 1:\n    del math",
+        "import math\ntry:\n    x = 1 / m\nexcept ZeroDivisionError as math:\n    pass",
+        "import math\ndef f():\n    global math\n    del math\nf()\nx = m",
+        "import sys\nsys.path.insert(0, f'plugins/{m}')\nimport math",
+    ],
+)
+def test_an_import_that_may_differ_by_variant_stays_collapsed(run, body):
+    analysis = run(*MEMBERS, "# @per_variant\n" + body, "print(math)", groups=SWEEP)
+    assert "math" not in analysis.cells["c2"].imports
+    assert analysis.variant_read("c3", "c2", "math") == cg.VariantRead(
+        ("big", "small"), False, True
+    )
+
+
 def test_a_fan_out_output_without_instances_is_an_output(run):
     # Published once, not per instance: keyed as it is, not as an empty fan-out.
     analysis = fanout(run)
@@ -530,3 +596,11 @@ def test_a_fan_out_output_without_instances_is_an_output(run):
         instances=snapshot.instances,
     )
     assert analysis.execution_key("c4", published=published(c3=changed), env_hash=ENV) != key
+
+
+def test_a_variant_may_import_what_its_sibling_does_not(run):
+    analysis = run("# @variant g small\nimport math\nm = math.pi", "# @variant g big\nm = 2")
+    assert "variant_contract_mismatch" not in codes(analysis)
+    # A name a variant imports and assigns is part of its contract.
+    analysis = run("# @variant g small\nimport math\nmath = 1\nm = 1", "# @variant g big\nm = 2")
+    assert "variant_contract_mismatch" in codes(analysis)

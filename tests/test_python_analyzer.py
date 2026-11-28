@@ -826,3 +826,39 @@ class TestMatchCaptures:
     def test_value_pattern_is_a_reference(self):
         result = analyze_cell("match c:\n    case Color.RED:\n        hit = 1\n")
         assert sorted(result.references) == ["Color", "c"]
+
+
+class TestImports:
+    """Defines bound only by a top-level import: the same module whatever the inputs."""
+
+    @pytest.mark.parametrize(
+        ("source", "imports"),
+        [
+            ("import math\nscore = math.prod(xs)", ["math"]),
+            ("import numpy as np, os.path\nfrom a import b as c", ["c", "np", "os"]),
+            ("import math\nimport math", ["math"]),
+            ("from a import *", []),
+            ("if m:\n    import a as x\nelse:\n    import b as x", []),
+            ("try:\n    import ujson as json\nexcept ImportError:\n    import json", []),
+            ("import math\nmath = 2", []),
+            ("math = 2\nimport math", []),
+            ("import math\nmath.tau = 1", []),
+            ("import math\ndel math", []),
+            ("import math\ndef f():\n    global math\n    math = 1", []),
+            ("import math\nfor math in xs:\n    pass", []),
+            ("import math\nwith open(p) as math:\n    pass", []),
+            ("import math\ndef math(): pass", []),
+            ("def f():\n    import os\nclass C:\n    import sys", []),
+            ("import _private", []),
+            ('"""Doc."""\nimport math\nx = 1', ["math"]),
+            ("x = 1\nimport math", []),
+            ("import sys\nsys.path.insert(0, p)\nimport plugin", ["sys"]),
+            ("import math\nif c:\n    del math", []),
+            ("import math\ntry:\n    pass\nexcept E as math:\n    pass", []),
+            ("import math\ndef f():\n    global math\n    del math", []),
+            ("import math\ndef f():\n    global math", []),
+            ("import math\ndef f():\n    math = 1", ["math"]),
+        ],
+    )
+    def test_imports(self, source, imports):
+        assert analyze_cell(source).imports == imports

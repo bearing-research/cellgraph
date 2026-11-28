@@ -50,6 +50,9 @@ class CellNames:
     bodies_unread: bool = False
     # What went wrong in a call reader, one line each; the names it gave are dropped.
     reader_failures: list[str] = field(default_factory=list)
+    # Defines bound only by an import at the head of the cell, so the same module
+    # whatever the cell's inputs: see ``_leading_imports``.
+    imports: list[str] = field(default_factory=list)
 
 
 # The names one call reads that its code does not show (``df.query("a > @mu")`` reads
@@ -226,6 +229,31 @@ def _collect_name_targets(target: ast.expr, out: set[str]) -> None:
         _collect_name_targets(target.value, out)
 
 
+def _leading_imports(module: ast.Module) -> list[ast.Import | ast.ImportFrom]:
+    """The imports at the head of *module*, before any other statement but a docstring.
+
+    A statement before an import may change what it finds (``sys.path.insert``,
+    ``os.chdir``), so only these are taken to give the same module every run.
+    """
+    found: list[ast.Import | ast.ImportFrom] = []
+    for index, stmt in enumerate(module.body):
+        if isinstance(stmt, (ast.Import, ast.ImportFrom)):
+            found.append(stmt)
+        elif not (
+            index == 0
+            and isinstance(stmt, ast.Expr)
+            and isinstance(stmt.value, ast.Constant)
+            and isinstance(stmt.value.value, str)
+        ):
+            break
+    return found
+
+
+def _declared_global(tree: ast.Module) -> set[str]:
+    """Every name a ``global`` statement anywhere in *tree* declares."""
+    return {name for node in ast.walk(tree) if isinstance(node, ast.Global) for name in node.names}
+
+
 def _type_param_names(params: list[ast.type_param]) -> set[str]:
     """Names bound by PEP 695 type parameters (``[T, *Ts, **P]``)."""
     return {p.name for p in params if isinstance(p, (ast.TypeVar, ast.TypeVarTuple, ast.ParamSpec))}
@@ -279,6 +307,12 @@ class VariableAnalyzer(ast.NodeVisitor):
         # PEP 563 stringifies annotations, so under it they are not
         # runtime references.
         self._future_annotations: bool = False
+        # Names an import at the head of the cell binds, and names bound or unbound any
+        # other way (another import, an assignment, a mutation, a ``del``, an ``except
+        # E as name``): ``imports`` is the first less the second.
+        self.top_imported: set[str] = set()
+        self.bound_otherwise: set[str] = set()
+        self._top_imports: set[int] = set()
 
     def visit_Module(self, node: ast.Module) -> None:
         """Visit module: process top-level statements."""
@@ -288,6 +322,7 @@ class VariableAnalyzer(ast.NodeVisitor):
             and any(alias.name == "annotations" for alias in s.names)
             for s in node.body
         )
+        self._top_imports = {id(s) for s in _leading_imports(node)}
         self._visit_body(node.body)
 
     def _visit_body(self, body: list[ast.stmt]) -> None:
@@ -413,6 +448,7 @@ class VariableAnalyzer(ast.NodeVisitor):
         for name in body.mutation_defines - body.pure_defines:
             self.defines.add(name)
             self.mutation_defines.add(name)
+            self.bound_otherwise.add(name)
         self._defined_so_far.add(node.name)
 
     def _visit_function_signature(
@@ -447,7 +483,7 @@ class VariableAnalyzer(ast.NodeVisitor):
         """Handle: import foo, import foo as bar, or import foo.bar (binds ``foo``)."""
         for alias in node.names:
             name = alias.asname if alias.asname else alias.name.split(".")[0]
-            self._bind(name)
+            self._bind(name, top_import=id(node) in self._top_imports)
             self._defined_so_far.add(name)
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
@@ -458,7 +494,7 @@ class VariableAnalyzer(ast.NodeVisitor):
                 pass
             else:
                 name = alias.asname if alias.asname else alias.name
-                self._bind(name)
+                self._bind(name, top_import=id(node) in self._top_imports)
                 self._defined_so_far.add(name)
 
     def visit_For(self, node: ast.For | ast.AsyncFor) -> None:
@@ -493,6 +529,9 @@ class VariableAnalyzer(ast.NodeVisitor):
             self.visit(node.type)
         old_local_vars = self._local_vars
         if node.name:
+            # Unbound when the handler ends, whatever it held before.
+            if node.name not in self._local_vars:
+                self.bound_otherwise.add(node.name)
             self._local_vars = self._local_vars | {node.name}
         for stmt in node.body:
             self.visit(stmt)
@@ -540,7 +579,7 @@ class VariableAnalyzer(ast.NodeVisitor):
         self._bind(name)
         self._defined_so_far.add(name)
 
-    def _bind(self, name: str) -> None:
+    def _bind(self, name: str, *, top_import: bool = False) -> None:
         """A binding that is not a mutation: def, class, import, walrus, a capture.
 
         A local name (``e`` in its ``except E as e`` handler) is unbound when the
@@ -550,6 +589,7 @@ class VariableAnalyzer(ast.NodeVisitor):
             return
         self.defines.add(name)
         self.pure_defines.add(name)
+        (self.top_imported if top_import else self.bound_otherwise).add(name)
 
     def visit_Delete(self, node: ast.Delete) -> None:
         """Handle ``del x``: x is referenced but not defined."""
@@ -560,6 +600,8 @@ class VariableAnalyzer(ast.NodeVisitor):
         """Read the root of a ``del`` target; ``del x[k]`` and ``del x.a`` mutate x."""
         if isinstance(target, ast.Name):
             self._read(target.id)
+            if target.id not in self._local_vars:
+                self.bound_otherwise.add(target.id)  # under ``if`` too: it may be unbound
             if self._unconditional:
                 self._defined_so_far.discard(target.id)
                 self.deleted.add(target.id)
@@ -708,6 +750,7 @@ class VariableAnalyzer(ast.NodeVisitor):
                 return  # a handler's own ``e``, gone when the handler ends
             self.defines.add(node.id)
             self.mutation_defines.add(node.id)
+            self.bound_otherwise.add(node.id)
         elif isinstance(node, (ast.Attribute, ast.Subscript)):
             self._add_mutation_define(node.value)
 
@@ -1128,6 +1171,11 @@ def analyze_cell(source: str, *, call_readers: Sequence[CallReader] = ()) -> Cel
         if not v.startswith("_") and v in _BUILTIN_NAMES and v not in pure_defined_names
     ]
 
+    # A function's ``global`` may bind or delete the name whenever it is called.
+    imports = (set(defines) & analyzer.top_imported) - (
+        analyzer.bound_otherwise | effective_mutation_defines | _declared_global(tree)
+    )
+
     return CellNames(
         defines=sorted(set(defines)),
         references=sorted(set(references)),
@@ -1136,6 +1184,7 @@ def analyze_cell(source: str, *, call_readers: Sequence[CallReader] = ()) -> Cel
         error=None,
         bodies_unread=found is None,
         reader_failures=reader_failures,
+        imports=sorted(imports),
     )
 
 
@@ -1238,6 +1287,7 @@ class PythonAnalyzer:
             references=list(result.references),
             builtin_references=list(result.builtin_references),
             mutation_defines=list(result.mutation_defines),
+            imports=list(result.imports),
             error=result.error,
             diagnostics=diagnostics,
         )

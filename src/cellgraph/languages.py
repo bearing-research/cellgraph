@@ -33,6 +33,10 @@ class Analyzed:
     error: str | None = None
     # Anything else the analyzer finds; an ERROR blocks the cell like a syntax error.
     diagnostics: list[Diagnostic] = field(default_factory=list)
+    # Defines whose value does not depend on the cell's inputs, as a module import's
+    # does not: every instance of a fan-out cell makes the same one. Last, so the
+    # fields before it keep their positions.
+    imports: list[str] = field(default_factory=list)
 
 
 class LanguageAnalyzer(Protocol):
