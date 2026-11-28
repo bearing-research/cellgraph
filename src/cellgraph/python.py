@@ -18,7 +18,7 @@ import symtable
 import sys
 import threading
 import unicodedata
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -123,9 +123,17 @@ def _identifier(name: object) -> str | None:
     return name if name.isidentifier() and not keyword.iskeyword(name) else None
 
 
+def _safe(text: Callable[[], str], fallback: str) -> str:
+    """*text*(), or *fallback* when it raises: a host's ``__str__`` or ``__repr__`` may."""
+    try:
+        return text()
+    except Exception:
+        return fallback
+
+
 def _exception_line(exc: Exception) -> str:
     """The exception's type and the first line of its message, cut short."""
-    text = str(exc).partition("\n")[0]
+    text = _safe(lambda: str(exc), "").partition("\n")[0]
     text = text if len(text) <= 120 else text[:119] + "…"
     return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
 
@@ -142,7 +150,8 @@ def _in_function_bodies(tree: ast.Module) -> set[int]:
 
 
 def _reader_label(reader: CallReader) -> str:
-    return getattr(reader, "__qualname__", None) or repr(reader)
+    label = _safe(lambda: getattr(reader, "__qualname__", None) or repr(reader), "")
+    return label if isinstance(label, str) and label else type(reader).__name__
 
 
 def _insert_call_reads(
@@ -177,7 +186,9 @@ def _insert_call_reads(
                     found[name] = None
                 else:
                     failures.append(
-                        f"{_reader_label(reader)} returned {given_name!r:.80}, not a name"
+                        f"{_reader_label(reader)} returned "
+                        f"{_safe(lambda: repr(given_name), type(given_name).__name__):.80}, "
+                        "not a name"
                     )
         if found:
             inserts.append((node, list(found)))
@@ -281,6 +292,8 @@ class VariableAnalyzer(ast.NodeVisitor):
         # Subscript/attribute mutations. Unlike pure rebinds these stay in
         # references: the cell depends on an upstream producer.
         self.mutation_defines: set[str] = set()
+        # In a class body: names mutated where the class's names are unseen.
+        self.module_mutations: set[str] = set()
         # Names read before the cell binds them (``df = df.dropna()``,
         # ``print(x); x = 5``): genuine upstream references that survive the
         # pure-define filter.
@@ -303,6 +316,9 @@ class VariableAnalyzer(ast.NodeVisitor):
         # whatever the class binds (a comprehension's elements, a nested class).
         self._in_class = False
         self._global_scope = False
+        # Names local to a class body only (its handler's ``e``), out of sight of the
+        # comprehensions and lambdas in it.
+        self._class_names: frozenset[str] | set[str] = frozenset()
         self.global_reads: set[str] = set()
         # PEP 563 stringifies annotations, so under it they are not
         # runtime references.
@@ -434,6 +450,8 @@ class VariableAnalyzer(ast.NodeVisitor):
         body = VariableAnalyzer()
         body._future_annotations = self._future_annotations
         body._local_vars = set(self._local_vars)
+        if self._in_class and not self._global_scope:
+            body._local_vars -= self._class_names  # an enclosing class's, unseen
         body._in_class = True
         body._visit_body(node.body)
         # A name the class deletes is looked up past it, in the module.
@@ -445,10 +463,14 @@ class VariableAnalyzer(ast.NodeVisitor):
         for name in sorted(body.read_before_define | body.global_reads):
             self._read(name)
         self._global_scope = old_global
-        for name in body.mutation_defines - body.pure_defines:
+        # A comprehension in the class mutates the module's name whatever the class
+        # binds; a mutation in the class's own scope is the class's when it binds it.
+        for name in (body.mutation_defines - body.pure_defines) | body.module_mutations:
             self.defines.add(name)
             self.mutation_defines.add(name)
             self.bound_otherwise.add(name)
+            if self._in_class:
+                self.module_mutations.add(name)
         self._defined_so_far.add(node.name)
 
     def _visit_function_signature(
@@ -528,14 +550,19 @@ class VariableAnalyzer(ast.NodeVisitor):
         if node.type:
             self.visit(node.type)
         old_local_vars = self._local_vars
+        old_class_names = self._class_names
         if node.name:
             # Unbound when the handler ends, whatever it held before.
             if node.name not in self._local_vars:
                 self.bound_otherwise.add(node.name)
             self._local_vars = self._local_vars | {node.name}
+            if self._in_class and not self._global_scope:
+                # A class's own name: its comprehensions and lambdas read the module's.
+                self._class_names = self._class_names | {node.name}
         for stmt in node.body:
             self.visit(stmt)
         self._local_vars = old_local_vars
+        self._class_names = old_class_names
 
     def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
         """Handle: walrus operator := at top level, or in a lambda (the lambda's name)."""
@@ -660,6 +687,8 @@ class VariableAnalyzer(ast.NodeVisitor):
         self._global_scope = old_global or self._in_class
         try:
             local_vars = set(self._local_vars)
+            if self._in_class and not old_global:
+                local_vars -= self._class_names
             for gen in node.generators:
                 _collect_name_targets(gen.target, local_vars)
             self._local_vars = local_vars
@@ -669,6 +698,7 @@ class VariableAnalyzer(ast.NodeVisitor):
             for index, gen in enumerate(node.generators):
                 if index:
                     self.visit(gen.iter)
+                self._comprehension_target(gen.target)
                 for cond in gen.ifs:
                     self.visit(cond)
             for elt in elements:
@@ -677,6 +707,22 @@ class VariableAnalyzer(ast.NodeVisitor):
             # A walrus in a lambda's comprehension binds in the lambda, which outlives it.
             self._local_vars = old_local_vars | self._lambda_walrus
             self._global_scope = old_global
+
+    def _comprehension_target(self, target: ast.expr) -> None:
+        """``for d[k] in xs`` in a comprehension assigns ``d[k]`` on each pass: a mutation.
+
+        In a lambda, whose body runs when it is called if ever, it is only read."""
+        if isinstance(target, (ast.Tuple, ast.List)):
+            for elt in target.elts:
+                self._comprehension_target(elt)
+        elif isinstance(target, ast.Starred):
+            self._comprehension_target(target.value)
+        elif isinstance(target, (ast.Subscript, ast.Attribute)) and self._in_lambda:
+            self._add_reference_target(
+                target if isinstance(target, ast.Subscript) else target.value
+            )
+        elif isinstance(target, (ast.Subscript, ast.Attribute)):
+            self._add_assign_target(target)
 
     def visit_Lambda(self, node: ast.Lambda) -> None:
         """Lambda: its defaults run now, and its body is read here with its parameters local.
@@ -693,7 +739,10 @@ class VariableAnalyzer(ast.NodeVisitor):
         params = {a.arg for a in (*args.posonlyargs, *args.args, *args.kwonlyargs)}
         params |= {a.arg for a in (args.vararg, args.kwarg) if a is not None}
         saved = self._local_vars, self._global_scope, self._in_lambda, self._lambda_walrus
-        self._local_vars = self._local_vars | params
+        outer = self._local_vars
+        if self._in_class and not saved[1]:
+            outer = outer - self._class_names
+        self._local_vars = outer | params
         # In a class body, a lambda cannot see the class's names either.
         self._global_scope = saved[1] or self._in_class
         self._in_lambda, self._lambda_walrus = True, set()
@@ -751,6 +800,8 @@ class VariableAnalyzer(ast.NodeVisitor):
             self.defines.add(node.id)
             self.mutation_defines.add(node.id)
             self.bound_otherwise.add(node.id)
+            if self._in_class and self._global_scope:
+                self.module_mutations.add(node.id)
         elif isinstance(node, (ast.Attribute, ast.Subscript)):
             self._add_mutation_define(node.value)
 
@@ -809,13 +860,71 @@ class _ForSymtable(ast.NodeTransformer):
         node.is_async = 0
         return node
 
+    _in_class = False
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> ast.AST:
+        outer, self._in_class = self._in_class, True
+        try:
+            return self.generic_visit(node)
+        finally:
+            self._in_class = outer
+
     def visit_ExceptHandler(self, node: ast.ExceptHandler) -> ast.AST:
         self.generic_visit(node)
-        if node.name and _holds_a_scope(node):
+        # A class's handler name is the class's: a scope inside reads the module's
+        # name past it, as symtable sees without a rename.
+        if node.name and not self._in_class and _holds_a_scope(node):
             renamer = _Rename(node.name, f"_cellgraph_{node.name}")
             node.body = [renamer.visit(stmt) for stmt in node.body]
             node.name = renamer.new
         return node
+
+
+class _LocalAnnotations(ast.NodeTransformer):
+    """A function's local variable annotations dropped: Python never evaluates them
+    (PEP 526), and symtable before 3.14 counts their names as read.
+
+    The ``x: T`` itself stays, so ``x`` is still the function's local.
+    """
+
+    def __init__(self) -> None:
+        self._in_function = False
+
+    def _scope(self, node: ast.AST, in_function: bool) -> ast.AST:
+        outer, self._in_function = self._in_function, in_function
+        try:
+            return self.generic_visit(node)
+        finally:
+            self._in_function = outer
+
+    def visit_FunctionDef(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> ast.AST:
+        return self._scope(node, True)
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> ast.AST:
+        return self._scope(node, False)  # a class body evaluates its annotations
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> ast.AST:
+        self.generic_visit(node)
+        if self._in_function:
+            node.annotation = ast.Constant(value=None)
+        return node
+
+
+def _has_local_annotation(tree: ast.Module) -> bool:
+    """Whether a function body (not a class in one) annotates a local variable."""
+    stack: list[tuple[ast.AST, bool]] = [(tree, False)]
+    while stack:
+        node, in_function = stack.pop()
+        if isinstance(node, ast.AnnAssign) and in_function:
+            return True
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            in_function = True
+        elif isinstance(node, ast.ClassDef):
+            in_function = False
+        stack.extend((child, in_function) for child in ast.iter_child_nodes(node))
+    return False
 
 
 def _holds_a_scope(handler: ast.ExceptHandler) -> bool:
@@ -895,11 +1004,12 @@ def _symbol_tables(source: str, tree: ast.Module) -> list[symtable.SymbolTable] 
     """
 
     def rewritten() -> str:
-        module = _ForSymtable().visit(ast.parse(source))
+        module = _LocalAnnotations().visit(_ForSymtable().visit(ast.parse(source)))
         return ast.unparse(ast.fix_missing_locations(module))
 
     try:
-        text = _deeply(rewritten) if _needs_rewrite(tree) else source
+        needed = _needs_rewrite(tree) or _has_local_annotation(tree)
+        text = _deeply(rewritten) if needed else source
         return [symtable.symtable(text, "<cell>", "exec")]
     except UNPARSEABLE:
         return None
@@ -944,6 +1054,192 @@ def _body_refs(tables: list[symtable.SymbolTable], class_unbound: set[str]) -> s
                 refs.add(sym.get_name())
         if scope.get_type() != "class":
             stack.extend((child, class_names) for child in scope.get_children())
+    return refs
+
+
+_COMPREHENSIONS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+
+
+def _class_level(body: list[ast.stmt]) -> Iterator[ast.AST]:
+    """Every node of a class body that runs in the class's own scope."""
+    stack: list[ast.AST] = list(body)
+    while stack:
+        node = stack.pop()
+        yield node
+        if not isinstance(
+            node,
+            (*_COMPREHENSIONS, ast.Lambda, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef),
+        ):
+            stack.extend(ast.iter_child_nodes(node))
+
+
+def _enclosing_parts(node: ast.AST) -> list[ast.AST]:
+    """The parts of a def, lambda or class that run in the scope around it."""
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        parts = [*node.decorator_list, node.args, node.returns]
+    elif isinstance(node, ast.Lambda):
+        parts = [node.args]
+    elif isinstance(node, ast.ClassDef):
+        parts = [*node.decorator_list, *node.bases, *(k.value for k in node.keywords)]
+    else:
+        parts = []
+    return [p for p in parts if p is not None]
+
+
+def _target_names(target: ast.expr) -> set[str]:
+    names: set[str] = set()
+    _collect_name_targets(target, names)
+    return names
+
+
+def _scope_bindings(
+    node: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda,
+) -> tuple[set[str], set[str]]:
+    """``(bound, comprehension_bound)``: the names *node*'s own scope binds, and the names
+    only its comprehensions bind as loop targets.
+
+    Since PEP 709 symtable counts a list, set or dict comprehension's loop target as a
+    local of the function around it, though it is the comprehension's alone.
+    """
+    bound: set[str] = set()
+    comprehension: set[str] = set()
+    args = node.args
+    for arg in (*args.posonlyargs, *args.args, *args.kwonlyargs, args.vararg, args.kwarg):
+        if arg is not None:
+            bound.add(arg.arg)
+    if not isinstance(node, ast.Lambda):
+        bound |= _type_param_names(node.type_params)
+    stack: list[ast.AST] = list(node.body) if isinstance(node.body, list) else [node.body]
+    while stack:
+        n = stack.pop()
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bound.add(n.name)
+            stack.extend(_enclosing_parts(n))  # ``def g(a=(n := 1))`` binds n here
+            continue
+        if isinstance(n, ast.Lambda):
+            stack.extend(_enclosing_parts(n))
+            continue
+        if isinstance(n, _COMPREHENSIONS):
+            for gen in n.generators:
+                comprehension |= _target_names(gen.target)
+                stack.extend([gen.iter, *gen.ifs])
+            stack.extend([n.key, n.value] if isinstance(n, ast.DictComp) else [n.elt])
+            continue
+        if isinstance(n, ast.Name) and isinstance(n.ctx, (ast.Store, ast.Del)):
+            bound.add(n.id)
+        elif isinstance(n, ast.alias) and n.name != "*":
+            bound.add((n.asname or n.name).split(".")[0])
+        elif isinstance(n, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)) and n.name:
+            bound.add(n.name)
+        elif isinstance(n, ast.MatchMapping) and n.rest:
+            bound.add(n.rest)
+        elif isinstance(n, (ast.Global, ast.Nonlocal)):
+            bound.update(n.names)
+        stack.extend(ast.iter_child_nodes(n))
+    return bound, comprehension - bound
+
+
+def _inner_scope_refs(tree: ast.Module, future_annotations: bool) -> set[str]:
+    """Module names read in function bodies that symtable resolves elsewhere.
+
+    - A name only a comprehension binds, read outside it (in the same function or a
+      nested one): symtable calls it the function's local, but it is the module's
+      unless an enclosing function binds it.
+    - A class body inside a function reads a name it also binds from the class
+      namespace, then the module, never an enclosing function; its comprehensions
+      and lambdas skip the class. The module-level visitor reads those rules for a
+      class at module level only.
+    """
+    refs: set[str] = set()
+    Chain = list[tuple[set[str], set[str]]]
+
+    def find(node: ast.AST, chain: Chain) -> None:
+        """Every scope in *node*, which runs in the innermost scope of *chain*."""
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for part in (*node.decorator_list, node.args, node.returns):
+                if part is not None:
+                    find(part, chain)
+            function(node, chain)
+        elif isinstance(node, ast.Lambda):
+            find(node.args, chain)
+            function(node, chain)
+        elif isinstance(node, ast.ClassDef):
+            for part in (*node.decorator_list, *node.bases, *(k.value for k in node.keywords)):
+                find(part, chain)
+            if chain:
+                class_body(node, chain)
+            for stmt in node.body:
+                find(stmt, chain)  # a method does not see the class's names
+        else:
+            for child in ast.iter_child_nodes(node):
+                find(child, chain)
+
+    def function(node: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda, chain: Chain) -> None:
+        bound, comprehension = _scope_bindings(node)
+        risky = comprehension.union(*(c for _, c in chain))
+        if risky:
+            body: list[ast.AST] = [*node.body] if isinstance(node.body, list) else [node.body]
+            for name in scan(body, frozenset(), risky - bound):
+                if not any(name in b for b, _ in chain):
+                    refs.add(name)
+        inner = [*chain, (bound, comprehension)]
+        for stmt in node.body if isinstance(node.body, list) else [node.body]:
+            find(stmt, inner)
+
+    def scan(nodes: list[ast.AST], active: frozenset[str], risky: set[str]) -> set[str]:
+        """Loads of *risky* names in this scope, outside the comprehensions binding them."""
+        found: set[str] = set()
+        stack: list[tuple[ast.AST, frozenset[str]]] = [(n, active) for n in nodes]
+        while stack:
+            n, act = stack.pop()
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                parts = [*n.decorator_list, n.args, n.returns]
+                stack.extend((p, act) for p in parts if p is not None)
+                continue
+            if isinstance(n, ast.Lambda):
+                stack.append((n.args, act))
+                continue
+            if isinstance(n, ast.ClassDef):
+                parts = [*n.decorator_list, *n.bases, *(k.value for k in n.keywords)]
+                stack.extend((p, act) for p in parts)
+                continue
+            if isinstance(n, _COMPREHENSIONS):
+                inside = act.union(*(_target_names(g.target) for g in n.generators))
+                stack.append((n.generators[0].iter, act))
+                for index, gen in enumerate(n.generators):
+                    if index:
+                        stack.append((gen.iter, inside))
+                    stack.extend((cond, inside) for cond in gen.ifs)
+                    stack.append((gen.target, inside))
+                elements = [n.key, n.value] if isinstance(n, ast.DictComp) else [n.elt]
+                stack.extend((e, inside) for e in elements)
+                continue
+            if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load):
+                if n.id in risky and n.id not in act:
+                    found.add(n.id)
+                continue
+            stack.extend((child, act) for child in ast.iter_child_nodes(n))
+        return found
+
+    def class_body(node: ast.ClassDef, chain: Chain) -> None:
+        body = VariableAnalyzer()
+        body._future_annotations = future_annotations
+        body._local_vars = _type_param_names(node.type_params)
+        body._in_class = True
+        body._visit_body(node.body)
+        # What the class binds, not what it only mutates (``d[k] = 1`` reads the
+        # function's ``d``), nor what it declares ``nonlocal``.
+        declared = {
+            name
+            for stmt in _class_level(node.body)
+            if isinstance(stmt, ast.Nonlocal)
+            for name in stmt.names
+        }
+        own = (body.pure_defines | body._defined_so_far) - declared
+        refs.update(body.read_before_define & own)
+        refs.update((body.global_reads & own) - set().union(*(b for b, _ in chain)))
+
+    find(tree, [])
     return refs
 
 
@@ -1134,6 +1430,11 @@ def analyze_cell(source: str, *, call_readers: Sequence[CallReader] = ()) -> Cel
     found = _symbol_tables(read_source, read_tree)
     tables = found or []
     nested_refs = _body_refs(tables, analyzer.class_unbound)
+    try:
+        future = analyzer._future_annotations
+        nested_refs |= _deeply(lambda: _inner_scope_refs(read_tree, future))
+    except RecursionError:
+        return CellNames(too_deep=True)
     if found is not None and rewritten:
         original = _symbol_tables(source, tree)
         if original is not None:

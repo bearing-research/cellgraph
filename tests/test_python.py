@@ -120,9 +120,10 @@ CASES = [
     ("try:\n    pass\nexcept E as e:\n    f = lambda: e", ["f"], ["E"], []),
     ("try:\n    pass\nexcept E as e:\n    def g():\n        return e", ["g"], ["E"], []),
     (
+        # A class's handler name is the class's: its lambda reads the module's ``e``.
         "class C:\n    try:\n        pass\n    except E as e:\n        f = lambda: e",
         ["C"],
-        ["E"],
+        ["E", "e"],
         [],
     ),
     # Only the handler's: a def elsewhere reading e still reads the module's.
