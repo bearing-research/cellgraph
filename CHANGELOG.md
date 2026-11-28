@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- Execution keys, from an audit:
+  - A `.` in a cell id or group name is escaped in key addresses (`%2E`, and `%`
+    as `%25`), so a cell `a` making `x.y` and a cell `a.x` making `y` no longer
+    share the address `output:a.x.y`, where swapping their values kept the key. A
+    key whose ids and groups have neither character is unchanged, and
+    `PARTS_SCHEMA` stays 2: the parts' shape is the same, so a host's cache is
+    kept, and only the keys these fixes are about change.
+  - An upstream's output that the cell reads from another cell (shadowed) is keyed
+    as that upstream makes it: a fan-out cell's as its instances, not as the
+    instance the host stored last, and another variant's member's not at all in
+    an instance's key. `variant_read` follows the same rule.
+  - A seed from a fan-out cell reads its instances, as any other reader does.
+  - An `@each` item's key leaves out only the source it stands in for; another
+    upstream's output of the same name counts, as an unread output does.
+  - A non-canonical `env_hash` is a `TypeError` on every path, where an
+    `Unavailable` or `HostKeyed` result returned without one.
+
 - Call readers: a host's rules for names a call reads that its code does not show
   (#28). `PythonAnalyzer(call_readers=[...])` takes them, and each name one gives
   is read at its call as a bare name written there would be, in function bodies

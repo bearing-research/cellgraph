@@ -323,7 +323,9 @@ it, so check `dag.inactive_cells` first.
 - `execution_key(...)` and `plan(...)`, described below.
 - `variant_read(cell_id, upstream_id, var, instance=None)`: what the cell (or one
   of its instances) reads of `var` from `upstream_id` when a sweep makes it (for
-  a name the cell does not read, when `upstream_id` is in a sweep), as
+  a name the cell does not read, or reads from another cell, when `upstream_id` is
+  in a sweep, as that upstream makes it; a seed from a fan-out cell reads its
+  instances), as
   `VariantRead(variants, scalar, fanout)`, or None. `scalar` is an instance's own
   group, read as its variant's value; otherwise the `{variant: value}` dict.
   `fanout` says the variants are one fan-out cell's instances. A fan-out cell's
@@ -432,7 +434,7 @@ Results:
 - `Unavailable(reason, parts, unresolved)`: an unreadable output, a no-cache
   `Provenance` output without a content digest (its key follows its bytes), an
   unresolved input, or an in-key annotation missing from the fields.
-  `unresolved` holds their addresses: `output:<cell>.<var>`,
+  `unresolved` holds their addresses, escaped as in `parts` below: `output:<cell>.<var>`,
   `output:<cell>.<var>@<variant>` for one instance, `cell:<cell>`,
   `input:<kind>:<name>` and `field:<key>`.
 - `HostKeyed(parts, unresolved)`: for a language with `owns_key=False`. `parts`
@@ -452,7 +454,8 @@ A call the analysis cannot answer is a `ValueError`: an input kind with no entry
 does not fan out, an `Item` on one that is not `@each`, or an `Item` on a cell
 without items). A value that is not canonical JSON (`env_hash`, a hash, digest or
 id in `published`, a resolver's `identity` or `fingerprint`, an `Item`'s key or
-digest) is a `TypeError` from `canonical_json`.
+digest) is a `TypeError` from `canonical_json`; a non-canonical `env_hash` is one
+on every path, before an `Unavailable` or `HostKeyed` is returned.
 
 `outputs` is read lazily: a variable's ref is looked up only when the key counts
 it, so a host can pass a mapping that reads its store on demand.
@@ -464,8 +467,10 @@ it, so a host can pass a mapping that reads its store on demand.
 - `upstream`: `[address, component]` pairs, with addresses
   `output:<cell>.<var>`, `cell:<cell>`, `wired:<cell>.<var>`,
   `variant:<cell>.<var>@<name>`, `sweep:<group>.<var>`, `instances:<cell>.<var>`
-  and `each:<source>`. An `output:` or
-  `cell:` component is the output's own, as above; the others are canonical JSON
+  and `each:<source>`. In an address, a `.` in a cell id or group name is written
+  `%2E` and a `%` is written `%25`, so `<cell>` and `<group>` end at the first `.`: a cell `a` making
+  `x.y` and a cell `a.x` making `y` are `output:a.x.y` and `output:a%2Ex.y`. An
+  `output:` or `cell:` component is the output's own, as above; the others are canonical JSON
   lists that begin with their kind and nest that list:
   `["wired", var, component]`,
   `["variant", var, name, component]`,
